@@ -79,7 +79,7 @@ class GraphRepository:
         prompt_version: str,
     ) -> None:
         query = """
-        MERGE (cve:CVE {id: $cve.id})
+        MERGE (cve:CVE {id: $cve.cve_id})
         SET cve.description = $cve.description, cve.cvss = $cve.cvss,
             cve.updated_at = $cve.updated_at
         WITH cve

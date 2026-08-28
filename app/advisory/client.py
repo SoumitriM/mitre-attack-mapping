@@ -4,7 +4,7 @@ import ipaddress
 import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -68,7 +68,8 @@ def select_references(
             if tagged
             else SelectionReason.ALLOWLIST
         )
-        selected.setdefault(url, SelectedReference(reference, reason))
+        canonical_key = urldefrag(url).url.rstrip("/").lower()
+        selected.setdefault(canonical_key, SelectedReference(reference, reason))
     return sorted(
         selected.values(),
         key=lambda item: (item.reason == SelectionReason.ALLOWLIST, str(item.reference.url)),

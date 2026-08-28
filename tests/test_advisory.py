@@ -33,6 +33,18 @@ def test_selects_priority_tags_and_untagged_allowlisted_domains() -> None:
     ]
 
 
+def test_deduplicates_fragment_variants_of_same_advisory() -> None:
+    selected = select_references(
+        [
+            reference("https://research.example/writeup", []),
+            reference("https://research.example/writeup/#proof", []),
+        ],
+        ["research.example"],
+    )
+
+    assert len(selected) == 1
+
+
 @pytest.mark.asyncio
 async def test_rejects_private_network_destination(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_getaddrinfo(*args: object, **kwargs: object) -> list[Any]:

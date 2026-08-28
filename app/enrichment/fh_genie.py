@@ -1,5 +1,6 @@
 import json
 from typing import Any, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
@@ -61,13 +62,26 @@ class FHGenieEvidenceAgent:
         ]
         payload = json.dumps({"cve_id": cve_id, "advisories": sources}, ensure_ascii=False)
         failure = "invalid FH Genie response"
-        for _ in range(2):
+        invalid_steps: list[int] = []
+        for attempt in range(2):
+            messages: list[Any] = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": payload},
+            ]
+            if attempt and invalid_steps:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The prior response used supporting_text that was not an exact "
+                            f"substring for steps {invalid_steps}. Re-read the supplied text and "
+                            "copy each quotation verbatim, including punctuation."
+                        ),
+                    }
+                )
             response = await self._client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": payload},
-                ],
+                messages=messages,
                 temperature=1.0,
                 max_completion_tokens=4096,
                 extra_body={"reasoning_split": True},
@@ -78,7 +92,8 @@ class FHGenieEvidenceAgent:
                     failure = "empty FH Genie response"
                     continue
                 result = ExploitStepEnvelope.model_validate_json(content)
-                if self._is_grounded(result, advisories):
+                invalid_steps = self._unsupported_steps(result, advisories)
+                if not invalid_steps:
                     return result.steps
                 failure = "FH Genie response contains unsupported evidence"
             except ValidationError as exc:
@@ -91,13 +106,30 @@ class FHGenieEvidenceAgent:
 
     @staticmethod
     def _is_grounded(result: ExploitStepEnvelope, advisories: list[FetchedAdvisory]) -> bool:
+        return not FHGenieEvidenceAgent._unsupported_steps(result, advisories)
+
+    @staticmethod
+    def _unsupported_steps(
+        result: ExploitStepEnvelope, advisories: list[FetchedAdvisory]
+    ) -> list[int]:
         source_text = {
-            str(item.selected.reference.url): normalize_evidence_text(item.text)
+            FHGenieEvidenceAgent._canonical_url(str(item.selected.reference.url)):
+                normalize_evidence_text(item.text)
             for item in advisories
         }
+        invalid: list[int] = []
         for step in result.steps:
             for evidence in step.evidence:
-                text = source_text.get(str(evidence.source_url))
+                text = source_text.get(
+                    FHGenieEvidenceAgent._canonical_url(str(evidence.source_url))
+                )
                 if text is None or normalize_evidence_text(evidence.supporting_text) not in text:
-                    return False
-        return True
+                    invalid.append(step.step)
+                    break
+        return invalid
+
+    @staticmethod
+    def _canonical_url(value: str) -> str:
+        parsed = urlsplit(value)
+        path = parsed.path.rstrip("/") or "/"
+        return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
