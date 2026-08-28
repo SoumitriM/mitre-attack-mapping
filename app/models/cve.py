@@ -71,3 +71,5 @@ class CVERecord(BaseModel):
     updated_at: datetime | None = None
     sources: list[SourceAttribution] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    workarounds: list[str] = Field(default_factory=list)
+    field_provenance: dict[str, list[str]] = Field(default_factory=dict)

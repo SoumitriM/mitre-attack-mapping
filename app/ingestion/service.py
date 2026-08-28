@@ -7,7 +7,7 @@ import httpx
 
 from app.config import Settings
 from app.ingestion.base import SourceError
-from app.ingestion.cve import CVEOrgClient
+from app.ingestion.cvelist import CVEListV5Client
 from app.ingestion.normalize import normalize
 from app.ingestion.nvd import NVDClient
 from app.models import CVERecord
@@ -43,12 +43,12 @@ class CVEIngestionService:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.settings.http_timeout_seconds)
         try:
-            cve_client = CVEOrgClient(client, self.settings.http_max_retries)
+            cve_client = CVEListV5Client(self.settings.cvelist_v5_root)
             nvd_client = NVDClient(
                 client, self.settings.http_max_retries, api_key=self.settings.nvd_api_key
             )
-            (cve_data, cve_warning), (nvd_data, nvd_warning) = await asyncio.gather(
-                _capture(cve_client.fetch(normalized_id)), _capture(nvd_client.fetch(normalized_id))
+            (nvd_data, nvd_warning), (cve_data, cve_warning) = await asyncio.gather(
+                _capture(nvd_client.fetch(normalized_id)), _capture(cve_client.fetch(normalized_id))
             )
             if cve_data is None and nvd_data is None:
                 raise CVENotAvailable(f"No authoritative source returned {normalized_id}")

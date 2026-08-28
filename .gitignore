@@ -10,4 +10,7 @@ dist/
 build/
 *.egg-info/
 .env
+data/raw/
+data/manifest.json
+.neo4j/
 .DS_Store

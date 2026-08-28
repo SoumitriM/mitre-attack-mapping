@@ -1,3 +1,15 @@
+from app.models.analysis import (
+    AdvisoryResult,
+    CVEAnalysis,
+    EvidenceSubgraph,
+    ExploitStep,
+    ExploitStepEnvelope,
+    ExtractionStatus,
+    GraphEdge,
+    GraphNode,
+    SelectionReason,
+    StepEvidence,
+)
 from app.models.cve import (
     AffectedProduct,
     CVERecord,
@@ -14,4 +26,14 @@ __all__ = [
     "Reference",
     "ReferenceCategory",
     "SourceAttribution",
+    "AdvisoryResult",
+    "CVEAnalysis",
+    "EvidenceSubgraph",
+    "ExploitStep",
+    "ExploitStepEnvelope",
+    "ExtractionStatus",
+    "GraphEdge",
+    "GraphNode",
+    "SelectionReason",
+    "StepEvidence",
 ]
