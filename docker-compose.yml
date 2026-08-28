@@ -1,18 +1,25 @@
+name: mitre-attack-chain
+
 services:
   neo4j:
     image: neo4j:5.26-community
     environment:
       NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "${MITRE_NEO4J_HTTP_PORT:-7475}:7474"
+      - "${MITRE_NEO4J_BOLT_PORT:-7688}:7687"
     volumes:
       - neo4j-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          cypher-shell -u '${NEO4J_USERNAME:-neo4j}' -p '${NEO4J_PASSWORD}'
+          'RETURN 1' >/dev/null 2>&1
       interval: 10s
       timeout: 5s
       retries: 12
 
 volumes:
   neo4j-data:
+    name: mitre-attack-chain-neo4j-data

@@ -22,8 +22,19 @@ python -m pip install -e '.[dev]'
 cp .env.example .env
 ```
 
+To reuse the FH Genie credentials from the sibling `incident-resolution-ai` project while
+creating isolated Neo4j credentials and ports, run:
+
+```bash
+python scripts/configure_from_incident_env.py
+```
+
 Configure Neo4j and FH Genie in `.env`. An NVD API key is optional but recommended for
 higher rate limits. Never commit `.env`.
+
+This Compose stack is named `mitre-attack-chain`, uses its own
+`mitre-attack-chain-neo4j-data` volume, and publishes Neo4j on HTTP port 7475 and Bolt port
+7688. It does not share the sibling project's Neo4j container or data.
 
 Start Neo4j and explicitly synchronize the pinned datasets:
 

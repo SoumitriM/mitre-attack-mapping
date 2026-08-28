@@ -13,4 +13,5 @@ build/
 data/raw/
 data/manifest.json
 .neo4j/
+.env.configure.tmp
 .DS_Store
