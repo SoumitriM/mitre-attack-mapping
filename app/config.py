@@ -1,5 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator
@@ -15,7 +14,6 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=15.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0, le=10)
     cache_ttl_seconds: int = Field(default=3600, ge=0)
-    cvelist_v5_root: Path = Path("data/raw/cvelist-v5")
     advisory_allowed_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["offseq.com"]
     )

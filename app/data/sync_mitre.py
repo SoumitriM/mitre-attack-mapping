@@ -13,7 +13,6 @@ from neo4j import AsyncGraphDatabase
 
 from app.config import Settings
 
-CVELIST_COMMIT = "7d372af27f6929c1994de2bad584f69a7162839e"
 DATASETS = {
     "cwe": {
         "version": "4.20",
@@ -23,9 +22,13 @@ DATASETS = {
         "version": "3.9",
         "url": "https://capec.mitre.org/data/archive/capec_v3.9.zip",
     },
-    "cvelist-v5": {
-        "version": CVELIST_COMMIT,
-        "url": f"https://github.com/CVEProject/cvelistV5/archive/{CVELIST_COMMIT}.zip",
+    "enterprise-attack": {
+        "version": "19.1",
+        "url": (
+            "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/"
+            "v19.1/enterprise-attack/enterprise-attack-19.1.json"
+        ),
+        "filename": "source.json",
     },
 }
 
@@ -56,25 +59,26 @@ async def download_all(data_root: Path) -> dict[str, dict[str, Any]]:
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         for name, metadata in DATASETS.items():
             destination = data_root / name / str(metadata["version"])
-            archive = destination / "source.zip"
-            archive.parent.mkdir(parents=True, exist_ok=True)
+            artifact = destination / str(metadata.get("filename", "source.zip"))
+            artifact.parent.mkdir(parents=True, exist_ok=True)
             prior = previous.get(name, {})
-            if archive.is_file() and prior.get("sha256") == sha256(archive):
+            if artifact.is_file() and prior.get("sha256") == sha256(artifact):
                 digest = str(prior["sha256"])
                 retrieved_at = str(prior["retrieved_at"])
             else:
                 response = await client.get(str(metadata["url"]))
                 response.raise_for_status()
-                archive.write_bytes(response.content)
-                digest = sha256(archive)
+                artifact.write_bytes(response.content)
+                digest = sha256(artifact)
                 retrieved_at = datetime.now(UTC).isoformat()
-            extracted = destination / "extracted"
-            if not extracted.exists():
-                safe_extract(archive, extracted)
+            if artifact.suffix == ".zip":
+                extracted = destination / "extracted"
+                if not extracted.exists():
+                    safe_extract(artifact, extracted)
             manifest[name] = {
                 **metadata,
                 "retrieved_at": retrieved_at,
-                "size": archive.stat().st_size,
+                "size": artifact.stat().st_size,
                 "sha256": digest,
             }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,25 +131,98 @@ def parse_capec(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]
     return patterns, relationships
 
 
+def parse_attack(
+    path: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    objects = payload.get("objects", [])
+    tactics_by_short_name: dict[str, dict[str, Any]] = {}
+    for item in objects:
+        if (
+            item.get("type") != "x-mitre-tactic"
+            or item.get("revoked")
+            or item.get("x_mitre_deprecated")
+        ):
+            continue
+        external_id = next(
+            (
+                ref.get("external_id")
+                for ref in item.get("external_references", [])
+                if ref.get("source_name") == "mitre-attack"
+            ),
+            None,
+        )
+        if external_id and item.get("x_mitre_shortname"):
+            tactics_by_short_name[item["x_mitre_shortname"]] = {
+                "id": external_id,
+                "name": item.get("name"),
+                "short_name": item["x_mitre_shortname"],
+            }
+
+    techniques = []
+    links = []
+    for item in objects:
+        if item.get("type") != "attack-pattern":
+            continue
+        external_id = next(
+            (
+                ref.get("external_id")
+                for ref in item.get("external_references", [])
+                if ref.get("source_name") == "mitre-attack"
+            ),
+            None,
+        )
+        if not external_id:
+            continue
+        techniques.append(
+            {
+                "id": external_id,
+                "name": item.get("name"),
+                "description": item.get("description", ""),
+                "platforms": item.get("x_mitre_platforms", []),
+                "revoked": bool(item.get("revoked")),
+                "deprecated": bool(item.get("x_mitre_deprecated")),
+            }
+        )
+        for phase in item.get("kill_chain_phases", []):
+            tactic = tactics_by_short_name.get(phase.get("phase_name"))
+            if tactic:
+                links.append({"technique": external_id, "tactic": tactic["id"]})
+    return techniques, list(tactics_by_short_name.values()), links
+
+
 async def load_taxonomy(settings: Settings, data_root: Path) -> None:
     if settings.neo4j_password is None:
         raise ValueError("NEO4J_PASSWORD is required")
     cwe_root = data_root / "cwe" / DATASETS["cwe"]["version"] / "extracted"
     capec_root = data_root / "capec" / DATASETS["capec"]["version"] / "extracted"
+    attack_file = (
+        data_root
+        / "enterprise-attack"
+        / DATASETS["enterprise-attack"]["version"]
+        / "source.json"
+    )
     cwes = parse_cwe(find_xml(cwe_root, "cwec"))
     capecs, relationships = parse_capec(find_xml(capec_root, "capec"))
+    if not attack_file.is_file():
+        raise ValueError("downloaded archive has no Enterprise ATT&CK 19.1 STIX bundle")
+    techniques, tactics, technique_tactics = parse_attack(attack_file)
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_username, settings.neo4j_password.get_secret_value()),
     )
     try:
         async with driver.session() as session:
-            for label in ("CWE", "CAPEC"):
+            for label in ("CWE", "CAPEC", "AttackTechnique", "AttackTactic"):
                 await (await session.run(
                     f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS "
                     f"FOR (n:{label}) REQUIRE n.id IS UNIQUE"
                 )).consume()
-            for name, version in (("CWE", "4.20"), ("CAPEC", "3.9")):
+            for name, version in (
+                ("CWE", "4.20"),
+                ("CAPEC", "3.9"),
+                ("ATT&CK", "19.1"),
+            ):
                 await (await session.run(
                     "MERGE (r:DatasetRelease {name: $name, version: $version}) "
                     "SET r.loaded_at = $loaded_at",
@@ -169,6 +246,27 @@ async def load_taxonomy(settings: Settings, data_root: Path) -> None:
                     "MERGE (cwe)-[r:RELATED_TO_CAPEC]->(capec) "
                     "SET r.authoritative=true, r.source='CAPEC', r.source_version='3.9'",
                     rows=relationships[offset : offset + 500],
+                )).consume()
+            for offset in range(0, len(techniques), 500):
+                await (await session.run(
+                    "UNWIND $rows AS row MERGE (n:AttackTechnique {id: row.id}) "
+                    "SET n.name=row.name, n.description=row.description, "
+                    "n.platforms=row.platforms, n.revoked=row.revoked, "
+                    "n.deprecated=row.deprecated, n.source_version='19.1'",
+                    rows=techniques[offset : offset + 500],
+                )).consume()
+            await (await session.run(
+                "UNWIND $rows AS row MERGE (n:AttackTactic {id: row.id}) "
+                "SET n.name=row.name, n.short_name=row.short_name, n.source_version='19.1'",
+                rows=tactics,
+            )).consume()
+            for offset in range(0, len(technique_tactics), 500):
+                await (await session.run(
+                    "UNWIND $rows AS row MATCH (technique:AttackTechnique {id: row.technique}) "
+                    "MATCH (tactic:AttackTactic {id: row.tactic}) "
+                    "MERGE (technique)-[r:HAS_TACTIC]->(tactic) "
+                    "SET r.authoritative=true, r.source='ATT&CK', r.source_version='19.1'",
+                    rows=technique_tactics[offset : offset + 500],
                 )).consume()
     finally:
         await driver.close()

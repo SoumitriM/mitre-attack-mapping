@@ -7,5 +7,6 @@ def test_configuration_script_keeps_neo4j_isolated() -> None:
 
     assert '"NEO4J_URI": "bolt://localhost:7688"' in script
     assert '"MITRE_NEO4J_HTTP_PORT": "7475"' in script
+    assert "CVELIST_V5_ROOT" not in script
     assert "name: mitre-attack-chain" in compose
     assert "name: mitre-attack-chain-neo4j-data" in compose

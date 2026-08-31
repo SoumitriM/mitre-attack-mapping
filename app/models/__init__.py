@@ -1,5 +1,8 @@
 from app.models.analysis import (
     AdvisoryResult,
+    AttackCandidate,
+    AttackMapping,
+    AttackMappingEnvelope,
     CVEAnalysis,
     EvidenceSubgraph,
     ExploitStep,
@@ -27,6 +30,9 @@ __all__ = [
     "ReferenceCategory",
     "SourceAttribution",
     "AdvisoryResult",
+    "AttackCandidate",
+    "AttackMapping",
+    "AttackMappingEnvelope",
     "CVEAnalysis",
     "EvidenceSubgraph",
     "ExploitStep",

@@ -10,6 +10,9 @@ def test_health() -> None:
 
 
 def test_exposes_analysis_endpoint_and_retires_attack_path() -> None:
-    paths = TestClient(app).get("/openapi.json").json()["paths"]
+    schema = TestClient(app).get("/openapi.json").json()
+    paths = schema["paths"]
     assert "/api/cve-analysis" in paths
     assert "/api/attack-path" not in paths
+    analysis_schema = schema["components"]["schemas"]["CVEAnalysis"]
+    assert "attack_mappings" in analysis_schema["properties"]

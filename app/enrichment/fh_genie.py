@@ -1,5 +1,5 @@
 import json
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
@@ -54,6 +54,10 @@ class FHGenieEvidenceAgent:
             api_key=settings.fh_genie_key.get_secret_value(),
             base_url=settings.fh_genie_base_url,
         )
+
+    @property
+    def client(self) -> AsyncCompatibleClient:
+        return cast(AsyncCompatibleClient, self._client)
 
     async def extract(self, cve_id: str, advisories: list[FetchedAdvisory]) -> list[ExploitStep]:
         sources = [

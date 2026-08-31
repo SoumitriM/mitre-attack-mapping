@@ -43,7 +43,7 @@ class CVEIngestionService:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.settings.http_timeout_seconds)
         try:
-            cve_client = CVEListV5Client(self.settings.cvelist_v5_root)
+            cve_client = CVEListV5Client(client, self.settings.http_max_retries)
             nvd_client = NVDClient(
                 client, self.settings.http_max_retries, api_key=self.settings.nvd_api_key
             )

@@ -1,9 +1,16 @@
-import hashlib
-
 from neo4j import AsyncDriver
 
 from app.advisory.client import FetchedAdvisory
-from app.models import CVERecord, EvidenceSubgraph, ExploitStep, GraphEdge, GraphNode
+from app.enrichment.attack_mapper import evidence_id
+from app.models import (
+    AttackCandidate,
+    AttackMapping,
+    CVERecord,
+    EvidenceSubgraph,
+    ExploitStep,
+    GraphEdge,
+    GraphNode,
+)
 
 
 class GraphUnavailable(RuntimeError):
@@ -22,6 +29,9 @@ class GraphRepository:
         "CREATE CONSTRAINT advisory_url IF NOT EXISTS FOR (n:Advisory) REQUIRE n.url IS UNIQUE",
         "CREATE CONSTRAINT evidence_id IF NOT EXISTS FOR (n:Evidence) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT step_id IF NOT EXISTS FOR (n:ExploitStep) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT technique_id IF NOT EXISTS "
+        "FOR (n:AttackTechnique) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT tactic_id IF NOT EXISTS FOR (n:AttackTactic) REQUIRE n.id IS UNIQUE",
     )
 
     def __init__(self, driver: AsyncDriver) -> None:
@@ -39,11 +49,11 @@ class GraphRepository:
         try:
             async with self._driver.session() as session:
                 record = await (await session.run(
-                    "MATCH (r:DatasetRelease) WHERE r.name IN ['CWE', 'CAPEC'] "
+                    "MATCH (r:DatasetRelease) WHERE r.name IN ['CWE', 'CAPEC', 'ATT&CK'] "
                     "RETURN collect(DISTINCT r.name) AS names"
                 )).single()
-            if record is None or set(record["names"]) != {"CWE", "CAPEC"}:
-                raise TaxonomyUnavailable("required CWE/CAPEC datasets are not loaded")
+            if record is None or set(record["names"]) != {"CWE", "CAPEC", "ATT&CK"}:
+                raise TaxonomyUnavailable("required CWE/CAPEC/ATT&CK datasets are not loaded")
         except TaxonomyUnavailable:
             raise
         except Exception as exc:
@@ -159,9 +169,7 @@ class GraphRepository:
             data["evidence"] = [
                 {
                     **evidence,
-                    "id": hashlib.sha256(
-                        f"{evidence['source_url']}\0{evidence['supporting_text']}".encode()
-                    ).hexdigest(),
+                    "id": evidence_id(evidence["source_url"], evidence["supporting_text"]),
                 }
                 for evidence in data["evidence"]
             ]
@@ -183,19 +191,119 @@ class GraphRepository:
         except Exception as exc:
             raise GraphUnavailable("Neo4j analysis update failed") from exc
 
+    async def attack_candidates(
+        self,
+        step: ExploitStep,
+        platforms: list[str],
+        *,
+        limit: int = 8,
+    ) -> list[AttackCandidate]:
+        query = """
+        MATCH (technique:AttackTechnique)-[:HAS_TACTIC]->(tactic:AttackTactic)
+        WHERE technique.revoked = false AND technique.deprecated = false
+          AND (size($platforms) = 0 OR any(platform IN technique.platforms
+              WHERE toLower(platform) IN $platforms))
+        WITH technique, collect(DISTINCT {name: tactic.short_name, id: tactic.id}) AS tactics,
+             size([token IN $tokens WHERE
+               toLower(technique.name) CONTAINS token OR
+               toLower(technique.description) CONTAINS token]) AS score
+        WHERE score > 0
+        RETURN technique.id AS mitre_technique_id, technique.name AS name,
+               technique.description AS description, technique.platforms AS platforms,
+               tactics, score
+        ORDER BY score DESC, technique.id
+        LIMIT $limit
+        """
+        text = " ".join(
+            [
+                step.action,
+                *step.prerequisites,
+                step.outcome,
+                *(item.supporting_text for item in step.evidence),
+            ]
+        ).lower()
+        stop = {"that", "this", "with", "from", "into", "then", "when", "where", "every"}
+        tokens = list(
+            dict.fromkeys(
+                token.strip(".,:;()[]{}'\"")
+                for token in text.split()
+                if len(token.strip(".,:;()[]{}'\"")) >= 4
+                and token.strip(".,:;()[]{}'\"") not in stop
+            )
+        )[:40]
+        try:
+            async with self._driver.session() as session:
+                result = await session.run(
+                    query,
+                    platforms=sorted({item.lower() for item in platforms}),
+                    tokens=tokens,
+                    limit=limit,
+                )
+                records = [record async for record in result]
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j ATT&CK candidate query failed") from exc
+        return [
+            AttackCandidate(
+                mitre_technique_id=record["mitre_technique_id"],
+                name=record["name"],
+                description=record["description"],
+                platforms=record["platforms"],
+                tactics={item["name"]: item["id"] for item in record["tactics"]},
+            )
+            for record in records
+        ]
+
+    async def replace_attack_mappings(
+        self,
+        cve_id: str,
+        mappings: list[AttackMapping],
+        *,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        query = """
+        MATCH (cve:CVE {id: $cve_id})-[:HAS_EXPLOIT_STEP]->(step:ExploitStep)
+        OPTIONAL MATCH (step)-[old:MAPS_TO]->(:AttackTechnique)
+        DELETE old
+        WITH DISTINCT cve
+        UNWIND $mappings AS mapping
+        MATCH (cve)-[:HAS_EXPLOIT_STEP]->(step:ExploitStep {step: mapping.step})
+        OPTIONAL MATCH (technique:AttackTechnique {id: mapping.mitre_technique_id})
+        FOREACH (_ IN CASE WHEN technique IS NULL THEN [] ELSE [1] END |
+          MERGE (step)-[edge:MAPS_TO]->(technique)
+          SET edge.reasoning = mapping.reasoning, edge.confidence = mapping.confidence,
+              edge.model = $model, edge.prompt_version = $prompt_version,
+              edge.tactic_id = mapping.mitre_tactic_id,
+              edge.evidence_ids = mapping.evidence_ids)
+        """
+        try:
+            async with self._driver.session() as session:
+                await (await session.run(
+                    query,
+                    cve_id=cve_id,
+                    mappings=[item.model_dump(mode="json") for item in mappings],
+                    model=model,
+                    prompt_version=prompt_version,
+                )).consume()
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j ATT&CK mapping update failed") from exc
+
     async def subgraph(self, cve_id: str) -> EvidenceSubgraph:
         query = """
         MATCH path=(cve:CVE {id: $cve_id})-[*0..3]-(node)
         WHERE all(rel IN relationships(path) WHERE type(rel) IN
           ['HAS_WEAKNESS','RELATED_TO_CAPEC','HAS_ATTACK_PATTERN','AFFECTS',
            'RUNS_ON','HAS_COMPONENT','REFERENCES','CONTAINS','HAS_EXPLOIT_STEP',
-           'SUPPORTED_BY','NEXT'])
+           'SUPPORTED_BY','NEXT','MAPS_TO','HAS_TACTIC'])
         UNWIND nodes(path) AS n
         WITH collect(DISTINCT n) AS nodes, collect(DISTINCT relationships(path)) AS paths
         UNWIND paths AS rels UNWIND rels AS rel
         RETURN nodes,
           collect(DISTINCT {source: startNode(rel).id, relationship: type(rel),
-                            target: endNode(rel).id}) AS edges
+                            target: endNode(rel).id,
+                            authoritative: CASE WHEN type(rel) = 'MAPS_TO' THEN false
+                                                ELSE coalesce(rel.authoritative, true)
+                                           END}) AS edges
         """
         try:
             async with self._driver.session() as session:

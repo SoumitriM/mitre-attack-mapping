@@ -1,33 +1,14 @@
-import json
-from pathlib import Path
 from typing import Any
 
-from app.ingestion.base import SourceError
+from app.ingestion.base import JSONSourceClient
 
 
-class CVEListV5Client:
-    """Read a CVE record from a pinned local CVE List V5 snapshot."""
+class CVEListV5Client(JSONSourceClient):
+    """Fetch one CVE JSON 5 record live from the official CVE List repository."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
+    BASE_URL = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves"
 
     async def fetch(self, cve_id: str) -> dict[str, Any]:
         _, year, sequence = cve_id.split("-")
         bucket = f"{sequence[:-3]}xxx" if len(sequence) > 3 else "0xxx"
-        candidates = (
-            self.root / "cves" / year / bucket / f"{cve_id}.json",
-            self.root / year / bucket / f"{cve_id}.json",
-        )
-        path = next((item for item in candidates if item.is_file()), None)
-        if path is None and self.root.is_dir():
-            pattern = f"*/extracted/*/cves/{year}/{bucket}/{cve_id}.json"
-            path = next(self.root.glob(pattern), None)
-        if path is None:
-            raise SourceError(f"CVE List V5 has no local record for {cve_id}")
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SourceError(f"CVE List V5 record is unreadable for {cve_id}") from exc
-        if not isinstance(payload, dict):
-            raise SourceError(f"CVE List V5 record is invalid for {cve_id}")
-        return payload
+        return await self._get_json(f"{self.BASE_URL}/{year}/{bucket}/{cve_id}.json")

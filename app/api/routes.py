@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.analysis import CVEAnalysisService
 from app.config import get_settings
+from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.fh_genie import FHGenieEvidenceAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVENotAvailable, InvalidCVEID
@@ -31,10 +32,12 @@ async def analyze(request: AnalyzeRequest) -> CVEAnalysis:
         await graph.initialize()
         try:
             agent = FHGenieEvidenceAgent(settings)
+            mapper = FHGenieAttackMapper(settings, agent.client)
         except ValueError:
             agent = None
+            mapper = None
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            return await CVEAnalysisService(settings, graph, client, agent).analyze(
+            return await CVEAnalysisService(settings, graph, client, agent, mapper).analyze(
                 request.cve_id
             )
     except InvalidCVEID as exc:

@@ -59,6 +59,44 @@ class ExploitStepEnvelope(BaseModel):
         return self
 
 
+class AttackCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mitre_technique_id: str
+    name: str
+    description: str
+    platforms: list[str] = Field(default_factory=list)
+    tactics: dict[str, str] = Field(default_factory=dict)
+
+
+class AttackMapping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step: int = Field(ge=1)
+    action: str = Field(min_length=1)
+    mitre_technique_id: str | None = None
+    mitre_tactic_id: str | None = None
+    reasoning: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def ids_are_both_present_or_absent(self) -> "AttackMapping":
+        if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
+            raise ValueError("technique and tactic IDs must both be present or null")
+        if self.mitre_technique_id is None and self.confidence > 0.33:
+            raise ValueError("unmapped steps must have low confidence")
+        if self.mitre_technique_id is not None and not self.evidence_ids:
+            raise ValueError("mapped steps require evidence IDs")
+        return self
+
+
+class AttackMappingEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mappings: list[AttackMapping]
+
+
 class GraphNode(BaseModel):
     id: str
     type: str
@@ -81,5 +119,6 @@ class CVEAnalysis(BaseModel):
     cve: CVERecord
     advisories: list[AdvisoryResult] = Field(default_factory=list)
     exploit_steps: list[ExploitStep] = Field(default_factory=list)
+    attack_mappings: list[AttackMapping] = Field(default_factory=list)
     subgraph: EvidenceSubgraph = Field(default_factory=EvidenceSubgraph)
     warnings: list[str] = Field(default_factory=list)

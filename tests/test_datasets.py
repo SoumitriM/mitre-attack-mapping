@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.data.sync_mitre import parse_capec, parse_cwe, safe_extract
+from app.data.sync_mitre import parse_attack, parse_capec, parse_cwe, safe_extract
 
 
 def test_parses_cwe_and_capec_relationships(tmp_path: Path) -> None:
@@ -35,3 +35,38 @@ def test_rejects_zip_slip(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsafe path"):
         safe_extract(archive, tmp_path / "output")
+
+
+def test_parses_enterprise_attack_techniques_and_tactics(tmp_path: Path) -> None:
+    import json
+
+    path = tmp_path / "enterprise-attack-19.1.json"
+    path.write_text(json.dumps({"objects": [
+        {
+            "type": "x-mitre-tactic",
+            "name": "Command and Control",
+            "x_mitre_shortname": "command-and-control",
+            "external_references": [
+                {"source_name": "mitre-attack", "external_id": "TA0011"}
+            ],
+        },
+        {
+            "type": "attack-pattern",
+            "name": "Ingress Tool Transfer",
+            "description": "Transfer files or tools from an external system.",
+            "x_mitre_platforms": ["Windows", "Linux"],
+            "kill_chain_phases": [
+                {"kill_chain_name": "mitre-attack", "phase_name": "command-and-control"}
+            ],
+            "external_references": [
+                {"source_name": "mitre-attack", "external_id": "T1105"}
+            ],
+        },
+    ]}))
+
+    techniques, tactics, links = parse_attack(path)
+
+    assert techniques[0]["id"] == "T1105"
+    assert techniques[0]["platforms"] == ["Windows", "Linux"]
+    assert tactics[0]["id"] == "TA0011"
+    assert links == [{"technique": "T1105", "tactic": "TA0011"}]
