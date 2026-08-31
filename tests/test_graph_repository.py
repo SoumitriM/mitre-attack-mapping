@@ -54,6 +54,38 @@ async def test_graph_upsert_uses_cve_id_parameter() -> None:
     parameters = session.run.await_args.kwargs
     assert "MERGE (cve:CVE {id: $cve.cve_id})" in query
     assert parameters["cve"]["cve_id"] == "CVE-2026-22306"
+    assert parameters["record_json"] == record.model_dump_json()
+    assert parameters["retrieved_at"] == record.sources[0].retrieved_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_cve_cache_returns_fresh_normalized_record() -> None:
+    cached = CVERecord(cve_id="CVE-2026-22306", description="cached")
+    result = MagicMock()
+    result.single = AsyncMock(return_value={"record_json": cached.model_dump_json()})
+    session = MagicMock()
+    session.run = AsyncMock(return_value=result)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+
+    record = await GraphRepository(driver).cached_cve("CVE-2026-22306", 3600)
+
+    assert record == cached
+    parameters = session.run.await_args.kwargs
+    assert parameters["cve_id"] == "CVE-2026-22306"
+    assert "cutoff" in parameters
+
+
+@pytest.mark.asyncio
+async def test_zero_ttl_always_bypasses_cve_cache() -> None:
+    driver = MagicMock()
+
+    record = await GraphRepository(driver).cached_cve("CVE-2026-22306", 0)
+
+    assert record is None
+    driver.session.assert_not_called()
 
 
 @pytest.mark.asyncio

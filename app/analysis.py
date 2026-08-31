@@ -22,7 +22,7 @@ from app.enrichment.fh_genie import (
     FHGenieEvidenceAgent,
 )
 from app.graph.repository import GraphRepository
-from app.ingestion.service import CVEIngestionService
+from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import AdvisoryResult, AttackMapping, CVEAnalysis, ExtractionStatus
 
 
@@ -42,8 +42,11 @@ class CVEAnalysisService:
         self.mapper = mapper
 
     async def analyze(self, cve_id: str) -> CVEAnalysis:
+        normalized_id = normalize_cve_id(cve_id)
         await self.graph.verify_taxonomy()
-        cve = await CVEIngestionService(self.settings, self.client).analyze(cve_id)
+        cve = await self.graph.cached_cve(normalized_id, self.settings.cache_ttl_seconds)
+        if cve is None:
+            cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
         selected = select_references(cve.references, self.settings.advisory_allowed_domains)
         advisory_client = AdvisoryClient(
             self.client, max_bytes=self.settings.advisory_max_bytes

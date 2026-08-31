@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from neo4j import AsyncDriver
 
 from app.advisory.client import FetchedAdvisory
@@ -78,6 +80,29 @@ class GraphRepository:
             return None
         return [ExploitStep.model_validate(record["step"]) for record in records]
 
+    async def cached_cve(self, cve_id: str, ttl_seconds: int) -> CVERecord | None:
+        if ttl_seconds == 0:
+            return None
+        cutoff = datetime.now(UTC) - timedelta(seconds=ttl_seconds)
+        query = """
+        MATCH (cve:CVE {id: $cve_id})
+        WHERE cve.retrieved_at >= datetime($cutoff) AND cve.record_json IS NOT NULL
+        RETURN cve.record_json AS record_json
+        """
+        try:
+            async with self._driver.session() as session:
+                record = await (await session.run(
+                    query, cve_id=cve_id, cutoff=cutoff.isoformat()
+                )).single()
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j CVE cache query failed") from exc
+        if record is None:
+            return None
+        try:
+            return CVERecord.model_validate_json(record["record_json"])
+        except ValueError:
+            return None
+
     async def replace_analysis(
         self,
         cve: CVERecord,
@@ -91,8 +116,14 @@ class GraphRepository:
         query = """
         MERGE (cve:CVE {id: $cve.cve_id})
         SET cve.description = $cve.description, cve.cvss = $cve.cvss,
-            cve.updated_at = $cve.updated_at
+            cve.updated_at = $cve.updated_at, cve.record_json = $record_json,
+            cve.retrieved_at = datetime($retrieved_at)
         WITH cve
+        OPTIONAL MATCH (cve)-[old_context]->()
+        WHERE type(old_context) IN
+          ['HAS_WEAKNESS', 'HAS_ATTACK_PATTERN', 'AFFECTS', 'REFERENCES']
+        DELETE old_context
+        WITH DISTINCT cve
         OPTIONAL MATCH (cve)-[:HAS_EXPLOIT_STEP]->(old:ExploitStep)
         DETACH DELETE old
         WITH DISTINCT cve
@@ -181,6 +212,11 @@ class GraphRepository:
                 await (await session.run(
                     query,
                     cve=cve_data,
+                    record_json=cve.model_dump_json(),
+                    retrieved_at=max(
+                        (source.retrieved_at for source in cve.sources),
+                        default=datetime.now(UTC),
+                    ).isoformat(),
                     products=products,
                     advisories=advisory_data,
                     steps=step_data,

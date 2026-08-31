@@ -23,6 +23,13 @@ class CVENotAvailable(RuntimeError):
     pass
 
 
+def normalize_cve_id(cve_id: str) -> str:
+    normalized_id = cve_id.strip().upper()
+    if not CVE_PATTERN.fullmatch(normalized_id):
+        raise InvalidCVEID("Expected a CVE ID such as CVE-2024-12345")
+    return normalized_id
+
+
 async def _capture(task: Awaitable[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
     try:
         return await task, None
@@ -36,9 +43,7 @@ class CVEIngestionService:
         self._client = client
 
     async def analyze(self, cve_id: str) -> CVERecord:
-        normalized_id = cve_id.strip().upper()
-        if not CVE_PATTERN.fullmatch(normalized_id):
-            raise InvalidCVEID("Expected a CVE ID such as CVE-2024-12345")
+        normalized_id = normalize_cve_id(cve_id)
 
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.settings.http_timeout_seconds)
