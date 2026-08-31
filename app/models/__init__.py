@@ -12,6 +12,9 @@ from app.models.analysis import (
     GraphNode,
     SelectionReason,
     StepEvidence,
+    ValidatedAttackStep,
+    ValidationEnvelope,
+    ValidationStatus,
 )
 from app.models.cve import (
     AffectedProduct,
@@ -42,4 +45,7 @@ __all__ = [
     "GraphNode",
     "SelectionReason",
     "StepEvidence",
+    "ValidatedAttackStep",
+    "ValidationEnvelope",
+    "ValidationStatus",
 ]

@@ -9,6 +9,7 @@ from app.analysis import CVEAnalysisService
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.fh_genie import FHGenieEvidenceAgent
+from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository
 
 cli = typer.Typer(no_args_is_help=True)
@@ -33,11 +34,15 @@ async def _analyze(cve_id: str) -> dict[str, object]:
         try:
             agent = FHGenieEvidenceAgent(settings)
             mapper = FHGenieAttackMapper(settings, agent.client)
+            validator = FHGenieValidationAgent(settings, agent.client)
         except ValueError:
             agent = None
             mapper = None
+            validator = None
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            service = CVEAnalysisService(settings, graph, client, agent, mapper)
+            service = CVEAnalysisService(
+                settings, graph, client, agent, mapper, validator
+            )
             result = await service.analyze(cve_id)
         return result.model_dump(mode="json")
     finally:

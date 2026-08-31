@@ -16,3 +16,4 @@ def test_exposes_analysis_endpoint_and_retires_attack_path() -> None:
     assert "/api/attack-path" not in paths
     analysis_schema = schema["components"]["schemas"]["CVEAnalysis"]
     assert "attack_mappings" in analysis_schema["properties"]
+    assert "attack_chain" in analysis_schema["properties"]

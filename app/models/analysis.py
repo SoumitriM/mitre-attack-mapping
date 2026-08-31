@@ -97,6 +97,41 @@ class AttackMappingEnvelope(BaseModel):
     mappings: list[AttackMapping]
 
 
+class ValidationStatus(StrEnum):
+    VALIDATED = "validated"
+    UNMAPPED = "unmapped"
+
+
+class ValidatedAttackStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step: int = Field(ge=1)
+    action: str = Field(min_length=1)
+    mitre_technique_id: str | None = None
+    mitre_tactic_id: str | None = None
+    reasoning: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    validation_status: ValidationStatus
+
+    @model_validator(mode="after")
+    def validated_mapping_is_consistent(self) -> "ValidatedAttackStep":
+        if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
+            raise ValueError("technique and tactic IDs must both be present or null")
+        if self.validation_status == ValidationStatus.VALIDATED:
+            if self.mitre_technique_id is None or not self.evidence_ids:
+                raise ValueError("validated steps require ATT&CK IDs and evidence IDs")
+        elif self.mitre_technique_id is not None or self.confidence > 0.33:
+            raise ValueError("unmapped steps require null IDs and low confidence")
+        return self
+
+
+class ValidationEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[ValidatedAttackStep]
+
+
 class GraphNode(BaseModel):
     id: str
     type: str
@@ -120,5 +155,6 @@ class CVEAnalysis(BaseModel):
     advisories: list[AdvisoryResult] = Field(default_factory=list)
     exploit_steps: list[ExploitStep] = Field(default_factory=list)
     attack_mappings: list[AttackMapping] = Field(default_factory=list)
+    attack_chain: list[ValidatedAttackStep] = Field(default_factory=list)
     subgraph: EvidenceSubgraph = Field(default_factory=EvidenceSubgraph)
     warnings: list[str] = Field(default_factory=list)

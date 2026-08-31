@@ -12,6 +12,7 @@ from app.models import (
     ExploitStep,
     GraphEdge,
     GraphNode,
+    ValidatedAttackStep,
 )
 
 
@@ -323,6 +324,89 @@ class GraphRepository:
                 )).consume()
         except Exception as exc:
             raise GraphUnavailable("Neo4j ATT&CK mapping update failed") from exc
+
+    async def official_attack_context(
+        self, technique_ids: list[str]
+    ) -> dict[str, AttackCandidate]:
+        if not technique_ids:
+            return {}
+        query = """
+        MATCH (technique:AttackTechnique)
+        WHERE technique.id IN $technique_ids
+          AND technique.revoked = false AND technique.deprecated = false
+        OPTIONAL MATCH (technique)-[:HAS_TACTIC]->(tactic:AttackTactic)
+        WITH technique, collect(DISTINCT {name: tactic.short_name, id: tactic.id}) AS tactics
+        RETURN technique.id AS mitre_technique_id, technique.name AS name,
+               technique.description AS description, technique.platforms AS platforms,
+               tactics ORDER BY technique.id
+        """
+        try:
+            async with self._driver.session() as session:
+                result = await session.run(
+                    query, technique_ids=sorted(set(technique_ids))
+                )
+                records = [record async for record in result]
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j ATT&CK validation query failed") from exc
+        candidates = [
+            AttackCandidate(
+                mitre_technique_id=record["mitre_technique_id"],
+                name=record["name"],
+                description=record["description"],
+                platforms=record["platforms"],
+                tactics={
+                    item["name"]: item["id"]
+                    for item in record["tactics"]
+                    if item["id"] is not None
+                },
+            )
+            for record in records
+        ]
+        return {item.mitre_technique_id: item for item in candidates}
+
+    async def replace_validated_attack_chain(
+        self,
+        cve_id: str,
+        chain: list[ValidatedAttackStep],
+        *,
+        mapping_model: str,
+        mapping_prompt_version: str,
+        validation_model: str,
+        validation_prompt_version: str,
+    ) -> None:
+        query = """
+        MATCH (cve:CVE {id: $cve_id})-[:HAS_EXPLOIT_STEP]->(step:ExploitStep)
+        OPTIONAL MATCH (step)-[old:MAPS_TO]->(:AttackTechnique)
+        DELETE old
+        WITH DISTINCT cve
+        UNWIND $chain AS item
+        MATCH (cve)-[:HAS_EXPLOIT_STEP]->(step:ExploitStep {step: item.step})
+        OPTIONAL MATCH (technique:AttackTechnique {id: item.mitre_technique_id})
+        FOREACH (_ IN CASE WHEN technique IS NULL OR item.validation_status <> 'validated'
+                           THEN [] ELSE [1] END |
+          MERGE (step)-[edge:MAPS_TO]->(technique)
+          SET edge.reasoning = item.reasoning, edge.confidence = item.confidence,
+              edge.model = $mapping_model,
+              edge.prompt_version = $mapping_prompt_version,
+              edge.tactic_id = item.mitre_tactic_id,
+              edge.evidence_ids = item.evidence_ids,
+              edge.validation_status = item.validation_status,
+              edge.validation_model = $validation_model,
+              edge.validation_prompt_version = $validation_prompt_version)
+        """
+        try:
+            async with self._driver.session() as session:
+                await (await session.run(
+                    query,
+                    cve_id=cve_id,
+                    chain=[item.model_dump(mode="json") for item in chain],
+                    mapping_model=mapping_model,
+                    mapping_prompt_version=mapping_prompt_version,
+                    validation_model=validation_model,
+                    validation_prompt_version=validation_prompt_version,
+                )).consume()
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j validated attack-chain update failed") from exc
 
     async def subgraph(self, cve_id: str) -> EvidenceSubgraph:
         query = """

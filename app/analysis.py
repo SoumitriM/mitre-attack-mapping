@@ -21,6 +21,12 @@ from app.enrichment.fh_genie import (
     ExtractionResponseError,
     FHGenieEvidenceAgent,
 )
+from app.enrichment.validation_agent import (
+    VALIDATION_PROMPT_VERSION,
+    FHGenieValidationAgent,
+    ValidationResponseError,
+    unvalidated_chain,
+)
 from app.graph.repository import GraphRepository
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import AdvisoryResult, AttackMapping, CVEAnalysis, ExtractionStatus
@@ -34,12 +40,14 @@ class CVEAnalysisService:
         client: httpx.AsyncClient,
         agent: FHGenieEvidenceAgent | None = None,
         mapper: FHGenieAttackMapper | None = None,
+        validator: FHGenieValidationAgent | None = None,
     ) -> None:
         self.settings = settings
         self.graph = graph
         self.client = client
         self.agent = agent
         self.mapper = mapper
+        self.validator = validator
 
     async def analyze(self, cve_id: str) -> CVEAnalysis:
         normalized_id = normalize_cve_id(cve_id)
@@ -153,12 +161,52 @@ class CVEAnalysisService:
                     model=self.mapper.model,
                     prompt_version=MAPPING_PROMPT_VERSION,
                 )
+        attack_chain = []
+        if steps and not mappings:
+            attack_chain = unvalidated_chain(
+                steps, "No ATT&CK mapping was available for independent validation."
+            )
+        elif mappings and self.validator is None:
+            warnings.append("FH Genie ATT&CK validator is not configured")
+            attack_chain = unvalidated_chain(
+                steps, "The proposed mapping was not promoted because validation is unavailable."
+            )
+        elif mappings and self.validator is not None:
+            official = await self.graph.official_attack_context(
+                [
+                    item.mitre_technique_id
+                    for item in mappings
+                    if item.mitre_technique_id is not None
+                ]
+            )
+            try:
+                attack_chain = await self.validator.validate(
+                    cve, steps, mappings, official
+                )
+            except ValidationResponseError as exc:
+                warnings.append(str(exc))
+                attack_chain = unvalidated_chain(
+                    steps,
+                    "The proposed mapping was not promoted because grounded validation failed.",
+                )
+        if attack_chain:
+            await self.graph.replace_validated_attack_chain(
+                cve.cve_id,
+                attack_chain,
+                mapping_model=self.mapper.model if self.mapper else "unconfigured",
+                mapping_prompt_version=MAPPING_PROMPT_VERSION,
+                validation_model=(
+                    self.validator.model if self.validator else "unconfigured"
+                ),
+                validation_prompt_version=VALIDATION_PROMPT_VERSION,
+            )
         subgraph = await self.graph.subgraph(cve.cve_id)
         return CVEAnalysis(
             cve=cve,
             advisories=sorted(results, key=lambda item: str(item.url)),
             exploit_steps=steps,
             attack_mappings=mappings,
+            attack_chain=attack_chain,
             subgraph=subgraph,
             warnings=list(dict.fromkeys(warnings)),
         )

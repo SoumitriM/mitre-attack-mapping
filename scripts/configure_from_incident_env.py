@@ -35,6 +35,9 @@ def main() -> None:
         "HTTP_TIMEOUT_SECONDS": existing.get("HTTP_TIMEOUT_SECONDS", "15"),
         "HTTP_MAX_RETRIES": existing.get("HTTP_MAX_RETRIES", "3"),
         "CACHE_TTL_SECONDS": existing.get("CACHE_TTL_SECONDS", "3600"),
+        "VALIDATION_MIN_CONFIDENCE": existing.get(
+            "VALIDATION_MIN_CONFIDENCE", "0.5"
+        ),
         "ADVISORY_ALLOWED_DOMAINS": existing.get(
             "ADVISORY_ALLOWED_DOMAINS", "offseq.com"
         ),

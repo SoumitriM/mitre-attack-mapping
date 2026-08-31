@@ -5,7 +5,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.graph.repository import GraphRepository
-from app.models import AttackMapping, CVERecord, ExploitStep, SourceAttribution
+from app.models import (
+    AttackMapping,
+    CVERecord,
+    ExploitStep,
+    SourceAttribution,
+    ValidatedAttackStep,
+    ValidationStatus,
+)
 
 
 class AsyncRecords:
@@ -154,3 +161,74 @@ async def test_mapping_edge_records_model_prompt_reasoning_and_confidence() -> N
     assert "edge.reasoning = mapping.reasoning" in query
     assert parameters["model"] == "fh-model"
     assert parameters["mappings"][0]["confidence"] == 0.91
+
+
+@pytest.mark.asyncio
+async def test_official_attack_context_excludes_unavailable_techniques() -> None:
+    session = MagicMock()
+    session.run = AsyncMock(return_value=AsyncRecords([{
+        "mitre_technique_id": "T1105",
+        "name": "Ingress Tool Transfer",
+        "description": "Transfer files from an external system.",
+        "platforms": ["Windows"],
+        "tactics": [{"name": "command-and-control", "id": "TA0011"}],
+    }]))
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+
+    official = await GraphRepository(driver).official_attack_context(["T9999", "T1105"])
+
+    assert list(official) == ["T1105"]
+    assert official["T1105"].tactics == {"command-and-control": "TA0011"}
+    query = session.run.await_args.args[0]
+    assert "technique.revoked = false" in query
+    assert "technique.deprecated = false" in query
+
+
+@pytest.mark.asyncio
+async def test_validated_chain_replaces_edges_and_stores_only_validated_items() -> None:
+    result = MagicMock()
+    result.consume = AsyncMock()
+    session = MagicMock()
+    session.run = AsyncMock(return_value=result)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+    chain = [
+        ValidatedAttackStep(
+            step=1,
+            action="Download malicious archive",
+            mitre_technique_id="T1105",
+            mitre_tactic_id="TA0011",
+            reasoning="The evidence supports file transfer.",
+            confidence=0.9,
+            evidence_ids=["evidence-1"],
+            validation_status=ValidationStatus.VALIDATED,
+        ),
+        ValidatedAttackStep(
+            step=2,
+            action="Launch updater",
+            reasoning="No evidenced ATT&CK behavior was established.",
+            confidence=0.1,
+            validation_status=ValidationStatus.UNMAPPED,
+        ),
+    ]
+
+    await GraphRepository(driver).replace_validated_attack_chain(
+        "CVE-2026-22306",
+        chain,
+        mapping_model="mapper",
+        mapping_prompt_version="mapping-v1",
+        validation_model="validator",
+        validation_prompt_version="validation-v1",
+    )
+
+    query = session.run.await_args.args[0]
+    parameters = session.run.await_args.kwargs
+    assert "DELETE old" in query
+    assert "item.validation_status <> 'validated'" in query
+    assert "edge.validation_model = $validation_model" in query
+    assert parameters["chain"][1]["mitre_technique_id"] is None
