@@ -59,6 +59,14 @@ class ExploitStepEnvelope(BaseModel):
         return self
 
 
+class GroundingResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    supported: bool
+    confidence: float = Field(ge=0, le=1)
+    reasoning: str = Field(min_length=1)
+
+
 class AttackCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -102,26 +110,43 @@ class ValidationStatus(StrEnum):
     UNMAPPED = "unmapped"
 
 
+class ValidationChecks(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    technique_exists: bool
+    tactic_valid: bool
+    platform_compatible: bool
+    evidence_support: bool
+    semantic_match: bool
+
+
+class ValidationDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ValidationStatus
+    checks: ValidationChecks
+    reasoning: str = Field(min_length=1)
+    validator_confidence: float = Field(ge=0, le=1)
+
+
 class ValidatedAttackStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     step: int = Field(ge=1)
     action: str = Field(min_length=1)
-    mitre_technique_id: str | None = None
+    proposed_technique_id: str | None = None
     mitre_tactic_id: str | None = None
-    reasoning: str = Field(min_length=1)
-    confidence: float = Field(ge=0, le=1)
     evidence_ids: list[str] = Field(default_factory=list)
-    validation_status: ValidationStatus
+    validation: ValidationDetails
 
     @model_validator(mode="after")
     def validated_mapping_is_consistent(self) -> "ValidatedAttackStep":
-        if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
+        if (self.proposed_technique_id is None) != (self.mitre_tactic_id is None):
             raise ValueError("technique and tactic IDs must both be present or null")
-        if self.validation_status == ValidationStatus.VALIDATED:
-            if self.mitre_technique_id is None or not self.evidence_ids:
+        if self.validation.status == ValidationStatus.VALIDATED:
+            if self.proposed_technique_id is None or not self.evidence_ids:
                 raise ValueError("validated steps require ATT&CK IDs and evidence IDs")
-        elif self.mitre_technique_id is not None or self.confidence > 0.33:
+        elif self.proposed_technique_id is not None or self.validation.validator_confidence > 0.33:
             raise ValueError("unmapped steps require null IDs and low confidence")
         return self
 
@@ -129,7 +154,7 @@ class ValidatedAttackStep(BaseModel):
 class ValidationEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    steps: list[ValidatedAttackStep]
+    steps: list[ValidatedAttackStep] = Field(min_length=1, max_length=1)
 
 
 class GraphNode(BaseModel):
@@ -148,6 +173,47 @@ class GraphEdge(BaseModel):
 class EvidenceSubgraph(BaseModel):
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
+
+
+class PresentationProvenance(StrEnum):
+    AUTHORITATIVE = "authoritative"
+    ADVISORY_DERIVED = "advisory_derived"
+    LLM_INFERRED = "llm_inferred"
+
+
+class PresentationNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: str
+    label: str
+    provenance: PresentationProvenance
+    properties: dict[str, object] = Field(default_factory=dict)
+
+
+class PresentationEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str
+    relationship: str
+    provenance: PresentationProvenance
+    properties: dict[str, object] = Field(default_factory=dict)
+
+
+class AttackChainGraph(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cve_id: str
+    nodes: list[PresentationNode] = Field(default_factory=list)
+    edges: list[PresentationEdge] = Field(default_factory=list)
+    legend: dict[str, str] = Field(
+        default_factory=lambda: {
+            "authoritative": "Official CVE/CWE/CAPEC/ATT&CK relationship",
+            "advisory_derived": "Exploit behavior extracted from advisory evidence",
+            "llm_inferred": "ATT&CK mapping proposed by an LLM and independently validated",
+        }
+    )
 
 
 class CVEAnalysis(BaseModel):

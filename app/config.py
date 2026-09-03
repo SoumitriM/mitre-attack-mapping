@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=15.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0, le=10)
     cache_ttl_seconds: int = Field(default=3600, ge=0)
+    mapping_min_confidence: float = Field(default=0.75, ge=0, le=1)
     validation_min_confidence: float = Field(default=0.5, ge=0, le=1)
     advisory_allowed_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["offseq.com"]
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     fh_genie_key: SecretStr | None = None
     fh_genie_base_url: str | None = None
     fh_genie_model: str | None = None
+    fh_genie_embedding_model: str = "BAAI/bge-m3"
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: SecretStr | None = None

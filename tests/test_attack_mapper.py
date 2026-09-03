@@ -6,7 +6,6 @@ import pytest
 from app.config import Settings
 from app.enrichment.attack_mapper import (
     FHGenieAttackMapper,
-    MappingResponseError,
     evidence_id,
 )
 from app.models import AffectedProduct, AttackCandidate, CVERecord, ExploitStep
@@ -91,10 +90,12 @@ async def test_rejects_candidate_tactic_or_platform_outside_official_set(
         f'"evidence_ids":["{ev_id}"]}}]}}'
     ))
 
-    with pytest.raises(MappingResponseError, match="unsupported ATT&CK mapping"):
-        await FHGenieAttackMapper(settings(), api).map_steps(
-            cve(), [item], {1: [candidate(platforms)]}
-        )
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(
+        cve(), [item], {1: [candidate(platforms)]}
+    )
+
+    assert mappings[0].mitre_technique_id is None
+    assert "deterministic validation" in mappings[0].reasoning
 
 
 @pytest.mark.asyncio

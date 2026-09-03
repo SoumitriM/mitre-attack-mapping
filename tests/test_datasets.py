@@ -70,3 +70,36 @@ def test_parses_enterprise_attack_techniques_and_tactics(tmp_path: Path) -> None
     assert techniques[0]["platforms"] == ["Windows", "Linux"]
     assert tactics[0]["id"] == "TA0011"
     assert links == [{"technique": "T1105", "tactic": "TA0011"}]
+
+
+def test_parse_attack_prefers_active_duplicate_external_id(tmp_path: Path) -> None:
+    import json
+
+    reference = [{"source_name": "mitre-attack", "external_id": "T1562.001"}]
+    path = tmp_path / "enterprise-attack.json"
+    path.write_text(json.dumps({"objects": [
+        {
+            "type": "attack-pattern",
+            "name": "Disable Security Tools",
+            "revoked": True,
+            "external_references": reference,
+        },
+        {
+            "type": "attack-pattern",
+            "name": "Disable or Modify Tools",
+            "description": "Disable security tools to impair defenses.",
+            "x_mitre_platforms": ["Linux"],
+            "external_references": reference,
+        },
+    ]}))
+
+    techniques, _, _ = parse_attack(path)
+
+    assert techniques == [{
+        "id": "T1562.001",
+        "name": "Disable or Modify Tools",
+        "description": "Disable security tools to impair defenses.",
+        "platforms": ["Linux"],
+        "revoked": False,
+        "deprecated": False,
+    }]

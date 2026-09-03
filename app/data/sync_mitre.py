@@ -159,8 +159,8 @@ def parse_attack(
                 "short_name": item["x_mitre_shortname"],
             }
 
-    techniques = []
-    links = []
+    techniques_by_id: dict[str, dict[str, Any]] = {}
+    phases_by_id: dict[str, list[dict[str, Any]]] = {}
     for item in objects:
         if item.get("type") != "attack-pattern":
             continue
@@ -174,21 +174,31 @@ def parse_attack(
         )
         if not external_id:
             continue
-        techniques.append(
-            {
-                "id": external_id,
-                "name": item.get("name"),
-                "description": item.get("description", ""),
-                "platforms": item.get("x_mitre_platforms", []),
-                "revoked": bool(item.get("revoked")),
-                "deprecated": bool(item.get("x_mitre_deprecated")),
-            }
+        technique = {
+            "id": external_id,
+            "name": item.get("name"),
+            "description": item.get("description", ""),
+            "platforms": item.get("x_mitre_platforms", []),
+            "revoked": bool(item.get("revoked")),
+            "deprecated": bool(item.get("x_mitre_deprecated")),
+        }
+        current = techniques_by_id.get(external_id)
+        current_active = (
+            current is not None and not current["revoked"] and not current["deprecated"]
         )
-        for phase in item.get("kill_chain_phases", []):
-            tactic = tactics_by_short_name.get(phase.get("phase_name"))
+        incoming_active = not technique["revoked"] and not technique["deprecated"]
+        if current is None or (incoming_active and not current_active):
+            techniques_by_id[external_id] = technique
+            phases_by_id[external_id] = item.get("kill_chain_phases", [])
+
+    links = []
+    for external_id, phases in phases_by_id.items():
+        for phase in phases:
+            phase_name = phase.get("phase_name")
+            tactic = tactics_by_short_name.get(phase_name) if isinstance(phase_name, str) else None
             if tactic:
                 links.append({"technique": external_id, "tactic": tactic["id"]})
-    return techniques, list(tactics_by_short_name.values()), links
+    return list(techniques_by_id.values()), list(tactics_by_short_name.values()), links
 
 
 async def load_taxonomy(settings: Settings, data_root: Path) -> None:

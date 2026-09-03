@@ -1,0 +1,66 @@
+{
+  "version": "2026-08-31-v1",
+  "reviewed_at": "2026-08-31",
+  "methodology": "Expected actions are concise semantic summaries manually reviewed against the listed primary or government sources. Only behavior explicitly attributed to exploitation of the CVE is included; campaign follow-on behavior is excluded. Technique/tactic pairs are reviewed against Enterprise ATT&CK 19.1.",
+  "cases": [
+    {
+      "cve_id": "CVE-2021-44228",
+      "source_urls": [
+        "https://logging.apache.org/log4j/2.x/security.html",
+        "https://attack.mitre.org/techniques/T1190/"
+      ],
+      "review_notes": "The benchmark stops at exploitation of a vulnerable public-facing Log4j application and does not infer campaign payloads.",
+      "expected_steps": [
+        {
+          "step": 1,
+          "action": "Send an attacker-controlled JNDI lookup value to a public-facing application using vulnerable Log4j",
+          "required_action_terms": ["JNDI", "Log4j"],
+          "mitre_technique_id": "T1190",
+          "mitre_tactic_id": "TA0001"
+        }
+      ]
+    },
+    {
+      "cve_id": "CVE-2017-0144",
+      "source_urls": [
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-0144",
+        "https://attack.mitre.org/techniques/T1210/"
+      ],
+      "review_notes": "The expected behavior is exploitation of the remote SMB service with crafted packets; WannaCry actions are outside this CVE-only chain.",
+      "expected_steps": [
+        {
+          "step": 1,
+          "action": "Send crafted packets to the vulnerable Windows SMBv1 service to execute code remotely",
+          "required_action_terms": ["crafted", "SMB"],
+          "mitre_technique_id": "T1210",
+          "mitre_tactic_id": "TA0008"
+        }
+      ]
+    },
+    {
+      "cve_id": "CVE-2023-34362",
+      "source_urls": [
+        "https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-158a",
+        "https://attack.mitre.org/techniques/T1190/",
+        "https://attack.mitre.org/techniques/T1505/003/"
+      ],
+      "review_notes": "CISA explicitly describes SQL injection exploitation followed by LEMURLOOT web-shell installation; later operator commands are excluded.",
+      "expected_steps": [
+        {
+          "step": 1,
+          "action": "Exploit SQL injection in the public-facing MOVEit Transfer web application",
+          "required_action_terms": ["SQL injection", "MOVEit"],
+          "mitre_technique_id": "T1190",
+          "mitre_tactic_id": "TA0001"
+        },
+        {
+          "step": 2,
+          "action": "Install the LEMURLOOT web shell on the MOVEit Transfer server",
+          "required_action_terms": ["LEMURLOOT", "web shell"],
+          "mitre_technique_id": "T1505.003",
+          "mitre_tactic_id": "TA0003"
+        }
+      ]
+    }
+  ]
+}

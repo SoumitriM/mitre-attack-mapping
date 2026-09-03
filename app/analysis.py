@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 
 import httpx
 
@@ -18,6 +19,7 @@ from app.enrichment.attack_mapper import (
 )
 from app.enrichment.fh_genie import (
     PROMPT_VERSION,
+    SYSTEM_PROMPT,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
 )
@@ -30,6 +32,8 @@ from app.enrichment.validation_agent import (
 from app.graph.repository import GraphRepository
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import AdvisoryResult, AttackMapping, CVEAnalysis, ExtractionStatus
+
+logger = logging.getLogger(__name__)
 
 
 class CVEAnalysisService:
@@ -143,7 +147,17 @@ class CVEAnalysisService:
                 }
             )
             candidate_lists = await asyncio.gather(
-                *(self.graph.attack_candidates(step, platforms) for step in steps)
+                *(
+                    self.graph.attack_candidates(
+                        step,
+                        platforms,
+                        cve_id=cve.cve_id,
+                        cwe_ids=cve.cwe_ids,
+                        capec_ids=cve.capec_ids,
+                        cve_description=cve.description,
+                    )
+                    for step in steps
+                )
             )
             candidates = {
                 step.step: candidate_list
@@ -179,11 +193,34 @@ class CVEAnalysisService:
                     if item.mitre_technique_id is not None
                 ]
             )
+            graph_facts = await self.graph.validation_facts(
+                cve.cve_id,
+                mappings,
+                sorted(
+                    {
+                        platform
+                        for product in cve.affected_products
+                        for platform in product.platforms
+                    }
+                ),
+            )
             try:
                 attack_chain = await self.validator.validate(
-                    cve, steps, mappings, official
+                    cve, steps, mappings, official, graph_facts
                 )
             except ValidationResponseError as exc:
+                logger.error(
+                    "ATT&CK validation pipeline failed",
+                    extra={
+                        "cve_id": cve.cve_id,
+                        "validation_stage": "final_validation",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "failure_reason": exc.failure_reason,
+                        "step": exc.context.get("step"),
+                        "technique_id": exc.context.get("technique_id"),
+                    },
+                )
                 warnings.append(str(exc))
                 attack_chain = unvalidated_chain(
                     steps,
@@ -214,6 +251,11 @@ class CVEAnalysisService:
     @staticmethod
     def _cache_key(advisories: list[FetchedAdvisory], model: str) -> str:
         material = "\0".join(
-            [model, PROMPT_VERSION, *sorted(item.checksum for item in advisories)]
+            [
+                model,
+                PROMPT_VERSION,
+                hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
+                *sorted(item.checksum for item in advisories),
+            ]
         )
         return hashlib.sha256(material.encode()).hexdigest()
