@@ -17,21 +17,105 @@ RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
 RERANK_SYSTEM_PROMPT = """
-You rerank supplied MITRE Enterprise ATT&CK candidates for ONE atomic exploit step.
-Rank semantic equivalence to the observed attacker behavior, not the vulnerability
-category. Do not favor candidates based only on shared keywords. You may use tactic
-and platform metadata as context, but never as hard pre-filters. Do not invent or
-retrieve techniques: return only IDs in the supplied candidate list.
+You are a CLOSED-SET reranker for MITRE Enterprise ATT&CK candidates for ONE atomic exploit step.
 
-Return exactly the 5 best supplied candidates, ordered best to worst. If fewer than
-5 seem plausibly relevant, still return the 5 highest-ranked supplied candidates.
-If fewer than 5 candidates were supplied, return every supplied candidate once.
-Keep each reasoning value to one short sentence so the complete JSON response fits
-within the output limit.
+Your task is ONLY to reorder and score the candidate techniques supplied in the input.
 
-Return JSON only in this schema:
-{"candidates":[{"mitre_technique_id":"T1059.003","reasoning":"...","rerank_score":0.94}]}
+CRITICAL CONSTRAINTS:
+
+* You MUST return ONLY MITRE technique IDs that appear exactly in the supplied candidate list.
+* NEVER introduce, infer, substitute, correct, expand, or retrieve any ATT&CK technique ID
+  that is not supplied.
+* Even if you know a more accurate ATT&CK technique, you MUST NOT return it unless its ID
+  appears in the supplied candidates.
+* Do not replace a supplied parent technique with an unsupplied sub-technique.
+* Do not replace a supplied sub-technique with an unsupplied parent technique.
+* Treat the supplied candidate IDs as an exhaustive closed set.
+* Before producing the final JSON, verify that every returned mitre_technique_id exists
+  verbatim in the supplied candidate list.
+
+RANKING CRITERIA:
+Rank candidates by semantic equivalence to the OBSERVED ATTACKER BEHAVIOR, not by
+vulnerability category or shared terminology.
+
+For each supplied candidate, evaluate:
+
+1. REQUIRED BEHAVIOR
+   Identify the defining behavior required by the ATT&CK technique.
+   A candidate should rank highly only if that defining behavior is explicitly observed
+   or strongly supported by the exploit-step evidence.
+
+2. MECHANISM MATCH
+   The attack mechanism must match, not merely the attacker's broad objective.
+   Similar words, outcomes, or security concepts are insufficient.
+
+3. ATTACK CONTEXT
+   Consider whether the behavior occurs during reconnaissance, initial access,
+   execution, persistence, privilege escalation, defense evasion, discovery,
+   lateral movement, command and control, or another relevant context.
+
+4. OUTCOME MATCH
+   Consider whether the observed result matches the purpose of the candidate technique.
+   Do not infer outcomes that are not stated or strongly implied.
+
+5. PLATFORM COMPATIBILITY
+   Use supplied platform metadata when available.
+   Strongly penalize candidates whose required platform or technology is incompatible
+   with the observed system.
+
+SCORING GUIDANCE:
+
+* 0.90-1.00: Direct behavioral and mechanistic match.
+* 0.75-0.89: Strong match with minor ambiguity.
+* 0.50-0.74: Plausibly related but incomplete or less specific.
+* 0.30-0.49: Weak relationship; mechanism or context differs.
+* 0.00-0.29: Defining behavior is absent, contradicted, or platform-incompatible.
+
+IMPORTANT:
+
+* Do not reward a candidate merely because words in its name appear in the exploit step.
+* Do not infer undocumented behavior just to make a technique fit.
+* If a technique requires a specific mechanism that is absent, score it <= 0.30.
+* If the platform is clearly incompatible, score it <= 0.20.
+* Prefer a broader supplied parent technique over an incorrect supplied sub-technique
+  when the sub-technique's defining mechanism is not present.
+
+OUTPUT RULES:
+
+* Return exactly the 5 highest-ranked SUPPLIED candidates.
+* If fewer than 5 candidates were supplied, return every supplied candidate exactly once.
+* Never return duplicate IDs.
+* Never return an ID outside the supplied candidate list.
+* The five returned candidates may all have low scores if none is a strong match.
+* Do not manufacture a better candidate to compensate for poor retrieval.
+* Keep each reasoning value to one short sentence.
+* Return JSON only.
+* Do not include markdown, commentary, code fences, or additional keys.
+
+Return exactly this JSON shape, replacing SUPPLIED_ID with an ID copied verbatim
+from ALLOWED_TECHNIQUE_IDS in the final instruction:
+
+{"candidates":[
+{
+"mitre_technique_id":"SUPPLIED_ID",
+"reasoning":"One short sentence comparing the supplied technique with the observed behavior.",
+"rerank_score":0.94
+}
+]}
 """.strip()
+
+
+def rerank_system_prompt(candidates: list[dict[str, Any]], expected_count: int) -> str:
+    """Bind the closed-set instructions to the IDs supplied for this request."""
+    allowed_ids = [str(item["mitre_technique_id"]) for item in candidates]
+    return (
+        f"{RERANK_SYSTEM_PROMPT}\n\n"
+        "FINAL CLOSED-SET INSTRUCTION:\n"
+        f"ALLOWED_TECHNIQUE_IDS={json.dumps(allowed_ids)}\n"
+        f"Return exactly {expected_count} candidates. Copy every technique ID verbatim "
+        "from ALLOWED_TECHNIQUE_IDS. Any other ID makes the entire response invalid."
+    )
+
 
 
 class EmbeddingData(Protocol):
@@ -206,7 +290,10 @@ async def rerank_candidates(
     response = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": RERANK_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": rerank_system_prompt(candidates, expected_count),
+            },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         temperature=0.0,

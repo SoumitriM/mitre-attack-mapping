@@ -12,6 +12,7 @@ from app.enrichment.candidate_retrieval import (
     canonical_attack_document,
     embedding_cache_key,
     rerank_candidates,
+    rerank_system_prompt,
     save_retrieval_log,
     top_vector_candidates,
 )
@@ -109,6 +110,15 @@ def test_abandoned_domain_appears_in_top_20_vector_candidates() -> None:
     assert candidates[0]["mitre_technique_id"] == "T1583.001"
 
 
+def test_rerank_prompt_contains_only_request_specific_technique_ids() -> None:
+    candidates = [record(1, "T1583.001"), record(2, "T1584.001")]
+    prompt = rerank_system_prompt(candidates, expected_count=2)
+    assert 'ALLOWED_TECHNIQUE_IDS=["T1583.001", "T1584.001"]' in prompt
+    assert "T1059.003" not in prompt
+    assert "Unix shell" not in prompt
+    assert "Return exactly 2 candidates" in prompt
+
+
 @pytest.mark.asyncio
 async def test_reranker_returns_exactly_top_5_supplied_candidates() -> None:
     candidates = [{**record(i), "vector_score": 1 - i / 100} for i in range(20)]
@@ -119,8 +129,11 @@ async def test_reranker_returns_exactly_top_5_supplied_candidates() -> None:
     assert [item["mitre_technique_id"] for item in ranked] == ids
     assert len(metadata) == RERANK_LIMIT
     payload = json.loads(client.chat.completions.create.await_args.kwargs["messages"][1]["content"])
+    system_prompt = client.chat.completions.create.await_args.kwargs["messages"][0]["content"]
     assert len(payload["candidates"]) == VECTOR_RETRIEVAL_LIMIT
     assert "description" in payload["candidates"][0]
+    assert all(item in system_prompt for item in ids)
+    assert "T1059.003" not in system_prompt
     assert client.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 8192
 
 
