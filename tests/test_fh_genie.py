@@ -11,6 +11,7 @@ from app.config import Settings
 from app.enrichment.fh_genie import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    DescriptionEvidence,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
 )
@@ -93,10 +94,35 @@ def extraction_and_grounding_mock(
     return AsyncMock(side_effect=create)
 
 
-def test_v4_prompt_requires_atomic_exploit_steps() -> None:
-    assert PROMPT_VERSION == "exploit-steps-v4"
+def test_v5_prompt_requires_atomic_deduplicated_exploit_steps() -> None:
+    assert PROMPT_VERSION == "exploit-steps-v5"
     assert "one coherent attacker behavior" in SYSTEM_PROMPT
     assert "Split a sequence into separate steps" in SYSTEM_PROMPT
+    assert "normalized CVE description" in SYSTEM_PROMPT
+    assert "duplicate steps" in SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_extracts_from_normalized_description_without_advisory() -> None:
+    description = DescriptionEvidence(
+        source_name="NVD",
+        source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-33557",
+        text="An attacker can generate a JWT token and the broker will accept it.",
+    )
+    api = MagicMock()
+    api.chat.completions.create = extraction_and_grounding_mock(
+        '{"steps":[{"step":1,"action":"Forge JWT token","prerequisites":[],'
+        '"outcome":"Broker accepts token","evidence":[{"source_url":'
+        '"https://nvd.nist.gov/vuln/detail/CVE-2026-33557","supporting_text":'
+        '"An attacker can generate a JWT token and the broker will accept it."}]}]}'
+    )
+    steps = await FHGenieEvidenceAgent(settings(), api).extract(
+        "CVE-2026-33557", [], description
+    )
+    payload = json.loads(api.chat.completions.create.await_args.kwargs["messages"][1]["content"])
+    assert steps[0].action == "Forge JWT token"
+    assert payload["description_evidence"]["source_name"] == "NVD"
+    assert payload["advisories"] == []
 
 
 @pytest.mark.asyncio

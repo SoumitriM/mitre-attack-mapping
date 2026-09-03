@@ -20,8 +20,10 @@ from app.enrichment.attack_mapper import (
 from app.enrichment.fh_genie import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    DescriptionEvidence,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
+    normalized_description_evidence,
 )
 from app.enrichment.validation_agent import (
     VALIDATION_PROMPT_VERSION,
@@ -31,7 +33,13 @@ from app.enrichment.validation_agent import (
 )
 from app.graph.repository import GraphRepository
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
-from app.models import AdvisoryResult, AttackMapping, CVEAnalysis, ExtractionStatus
+from app.models import (
+    AdvisoryResult,
+    AttackMapping,
+    CVEAnalysis,
+    DescriptionEvidenceResult,
+    ExtractionStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +74,16 @@ class CVEAnalysisService:
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
+        description = normalized_description_evidence(cve)
+        description_result = (
+            DescriptionEvidenceResult(
+                source_name=description.source_name,
+                source_url=description.source_url,
+                extraction_status=ExtractionStatus.COMPLETED,
+            )
+            if description
+            else None
+        )
 
         async def fetch_one(
             item: SelectedReference,
@@ -106,22 +124,27 @@ class CVEAnalysisService:
                 warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
 
         model = self.agent.model if self.agent else "unconfigured"
-        cache_key = self._cache_key(fetched, model)
-        steps = await self.graph.cached_steps(cve.cve_id, cache_key) if fetched else None
+        cache_key = self._cache_key(fetched, model, description)
+        has_evidence = bool(fetched or description)
+        steps = await self.graph.cached_steps(cve.cve_id, cache_key) if has_evidence else None
         if steps is None:
             steps = []
-            if not fetched:
-                warnings.append("No trusted advisory evidence was available for extraction")
+            if not has_evidence:
+                warnings.append("No trusted description or advisory evidence was available")
             elif self.agent is None:
                 warnings.append("FH Genie is not configured; exploit-step extraction was skipped")
+                if description_result:
+                    description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
                 for result in results:
                     if result.extraction_status == ExtractionStatus.COMPLETED:
                         result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
             else:
                 try:
-                    steps = await self.agent.extract(cve.cve_id, fetched)
+                    steps = await self.agent.extract(cve.cve_id, fetched, description)
                 except ExtractionResponseError as exc:
                     warnings.append(str(exc))
+                    if description_result:
+                        description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
                     for result in results:
                         if result.extraction_status == ExtractionStatus.COMPLETED:
                             result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
@@ -240,6 +263,7 @@ class CVEAnalysisService:
         subgraph = await self.graph.subgraph(cve.cve_id)
         return CVEAnalysis(
             cve=cve,
+            description_evidence=description_result,
             advisories=sorted(results, key=lambda item: str(item.url)),
             exploit_steps=steps,
             attack_mappings=mappings,
@@ -249,12 +273,21 @@ class CVEAnalysisService:
         )
 
     @staticmethod
-    def _cache_key(advisories: list[FetchedAdvisory], model: str) -> str:
+    def _cache_key(
+        advisories: list[FetchedAdvisory],
+        model: str,
+        description: DescriptionEvidence | None = None,
+    ) -> str:
         material = "\0".join(
             [
                 model,
                 PROMPT_VERSION,
                 hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
+                *(
+                    [description.source_name, description.source_url, description.text]
+                    if description
+                    else []
+                ),
                 *sorted(item.checksum for item in advisories),
             ]
         )

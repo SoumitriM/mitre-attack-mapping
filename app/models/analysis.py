@@ -30,6 +30,14 @@ class AdvisoryResult(BaseModel):
     extraction_status: ExtractionStatus
 
 
+class DescriptionEvidenceResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_name: str
+    source_url: HttpUrl
+    extraction_status: ExtractionStatus
+
+
 class StepEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -218,6 +226,7 @@ class AttackChainGraph(BaseModel):
 
 class CVEAnalysis(BaseModel):
     cve: CVERecord
+    description_evidence: DescriptionEvidenceResult | None = None
     advisories: list[AdvisoryResult] = Field(default_factory=list)
     exploit_steps: list[ExploitStep] = Field(default_factory=list)
     attack_mappings: list[AttackMapping] = Field(default_factory=list)

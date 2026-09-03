@@ -5,15 +5,21 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.enrichment.candidate_retrieval import (
+    BM25_RETRIEVAL_LIMIT,
     RERANK_LIMIT,
     VECTOR_RETRIEVAL_LIMIT,
     RerankEnvelope,
     behavior_query,
+    bm25_scores,
+    bm25_tokens,
     canonical_attack_document,
+    combine_candidates,
+    compact_description,
     embedding_cache_key,
     rerank_candidates,
     rerank_system_prompt,
     save_retrieval_log,
+    top_bm25_candidates,
     top_vector_candidates,
 )
 from app.models import ExploitStep
@@ -110,6 +116,49 @@ def test_abandoned_domain_appears_in_top_20_vector_candidates() -> None:
     assert candidates[0]["mitre_technique_id"] == "T1583.001"
 
 
+def test_bm25_tokenization_is_case_insensitive_and_preserves_mechanisms() -> None:
+    assert bm25_tokens("SQL Injection via COPY_TO/PROGRAM") == [
+        "sql",
+        "injection",
+        "via",
+        "copy_to/program",
+    ]
+
+
+def test_bm25_recovers_public_facing_exploitation_candidate() -> None:
+    records = [record(i) for i in range(30)]
+    records[24] = {
+        **record(24, "T1190"),
+        "name": "Exploit Public-Facing Application",
+        "description": (
+            "Adversaries may exploit a weakness in an Internet-facing host or system."
+        ),
+    }
+    scores = bm25_scores(
+        "Exploit SQL injection in a public-facing application", records
+    )
+    candidates = top_bm25_candidates(records, scores)
+    assert len(candidates) == BM25_RETRIEVAL_LIMIT == 20
+    assert candidates[0]["mitre_technique_id"] == "T1190"
+
+
+def test_hybrid_union_deduplicates_and_preserves_source_metadata() -> None:
+    shared = record(1, "T1190")
+    lexical = [{**shared, "bm25_score": 4.2}, {**record(2), "bm25_score": 2.1}]
+    vectors = [{**shared, "vector_score": 0.9}, {**record(3), "vector_score": 0.8}]
+    combined = combine_candidates(lexical, vectors)
+    assert len(combined) == 3
+    overlap = next(item for item in combined if item["mitre_technique_id"] == "T1190")
+    assert (overlap["bm25_rank"], overlap["vector_rank"]) == (1, 1)
+    assert (overlap["bm25_score"], overlap["vector_score"]) == (4.2, 0.9)
+
+
+def test_reranker_description_is_compacted_at_a_word_boundary() -> None:
+    compacted = compact_description("behavior " * 500)
+    assert len(compacted) <= 1201
+    assert compacted.endswith("…")
+
+
 def test_rerank_prompt_contains_only_request_specific_technique_ids() -> None:
     candidates = [record(1, "T1583.001"), record(2, "T1584.001")]
     prompt = rerank_system_prompt(candidates, expected_count=2)
@@ -151,7 +200,9 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
     import app.enrichment.candidate_retrieval as retrieval
 
     monkeypatch.setattr(retrieval, "RETRIEVAL_LOG_DIR", tmp_path)
+    lexical = [{**record(1, "T1583.001"), "bm25_score": 2.4}]
     candidates = [{**record(1, "T1583.001"), "vector_score": 0.81}]
+    combined = combine_candidates(lexical, candidates)
     reranked = RerankEnvelope.model_validate_json(
         response(["T1583.001"]).choices[0].message.content
     ).candidates
@@ -159,7 +210,9 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
         cve_id="CVE-2026-22306",
         step=step(),
         query_text=behavior_query(step()),
+        bm25_candidates=lexical,
         vector_candidates=candidates,
+        combined_candidates=combined,
         reranked=reranked,
     )
     payload = json.loads(path.read_text())
@@ -169,4 +222,7 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
         "Register abandoned domain",
     )
     assert payload["vector_candidates"][0]["id"] == "T1583.001"
+    assert payload["bm25_candidates"][0]["id"] == "T1583.001"
+    assert payload["combined_candidates"][0]["id"] == "T1583.001"
+    assert payload["overlap_count"] == 1
     assert payload["reranked_candidates"][0]["id"] == "T1583.001"

@@ -9,16 +9,20 @@ from neo4j import AsyncDriver
 from app.advisory.client import FetchedAdvisory
 from app.enrichment.attack_mapper import evidence_id
 from app.enrichment.candidate_retrieval import (
+    BM25_RETRIEVAL_LIMIT,
     RERANK_LIMIT,
     VECTOR_RETRIEVAL_LIMIT,
     EmbeddingClient,
     RerankClient,
     behavior_query,
+    bm25_scores,
     canonical_attack_document,
+    combine_candidates,
     embed_texts,
     embedding_cache_key,
     rerank_candidates,
     save_retrieval_log,
+    top_bm25_candidates,
     top_vector_candidates,
     vector_similarity_scores,
 )
@@ -284,12 +288,12 @@ class GraphRepository:
         *,
         limit: int = 10,
     ) -> list[AttackCandidate]:
-        """Retrieve ATT&CK candidates using semantic vector similarity only.
+        """Retrieve ATT&CK candidates using BM25 and semantic vector similarity.
 
-        The raw exploit-step behavior is embedded and compared against all active,
-        non-revoked Enterprise ATT&CK techniques stored in Neo4j. The top ``limit``
-        candidates are returned to FH Genie, which decides on one technique+tactic
-        or returns an unmapped result.
+        The raw exploit-step behavior is compared against all active, non-revoked
+        Enterprise ATT&CK techniques stored in Neo4j. BM25 and embedding retrieval
+        each contribute up to 20 candidates; FH Genie reranks their deduplicated union
+        down to ``limit`` candidates.
 
         ``platforms``, ``cwe_ids``, ``capec_ids``, and ``cve_description`` are kept
         in the signature for compatibility with existing callers, but they do not
@@ -376,6 +380,10 @@ class GraphRepository:
         vector_candidates = top_vector_candidates(
             records, vector_scores, VECTOR_RETRIEVAL_LIMIT
         )
+        lexical_candidates = top_bm25_candidates(
+            records, bm25_scores(behavior, records), BM25_RETRIEVAL_LIMIT
+        )
+        combined_candidates = combine_candidates(lexical_candidates, vector_candidates)
         rerank_error: Exception | None = None
         for attempt in range(2):
             try:
@@ -383,7 +391,7 @@ class GraphRepository:
                     self._rerank_client,
                     self._rerank_model,
                     step,
-                    vector_candidates,
+                    combined_candidates,
                     min(limit, RERANK_LIMIT),
                 )
                 break
@@ -409,18 +417,22 @@ class GraphRepository:
             cve_id=cve_id,
             step=step,
             query_text=behavior,
+            bm25_candidates=lexical_candidates,
             vector_candidates=vector_candidates,
+            combined_candidates=combined_candidates,
             reranked=reranked_metadata,
         )
 
         logger.info(
-            "ATT&CK vector candidate retrieval",
+            "ATT&CK hybrid candidate retrieval",
             extra={
                 "cve_id": cve_id,
                 "step": step.step,
                 "action": step.action,
                 "behavior_query": behavior,
                 "vector_candidate_count": len(vector_candidates),
+                "bm25_candidate_count": len(lexical_candidates),
+                "combined_candidate_count": len(combined_candidates),
                 "reranked_candidate_count": len(ranked),
                 "log_file": str(log_file),
             },

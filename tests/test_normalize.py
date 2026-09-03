@@ -87,3 +87,22 @@ def test_preserves_cvelist_capec_cvss_workaround_and_version_range() -> None:
     assert record.cvss and record.cvss.version == "4.0"
     assert record.affected_products[0].versions == [">=0, <1.1.1233"]
     assert record.workarounds == ["Disable the update job"]
+
+
+def test_collapses_description_whitespace() -> None:
+    record = normalize(
+        "CVE-2026-33557",
+        None,
+        {
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "descriptions": [
+                            {"lang": "en", "value": "Attacker  sends\n\ncrafted\u00a0token"}
+                        ]
+                    }
+                }
+            ]
+        },
+    )
+    assert record.description == "Attacker sends crafted token"

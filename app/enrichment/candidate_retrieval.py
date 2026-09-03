@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import re
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,7 +13,10 @@ from app.models import ExploitStep
 
 logger = logging.getLogger(__name__)
 VECTOR_RETRIEVAL_LIMIT = 20
+BM25_RETRIEVAL_LIMIT = 20
 RERANK_LIMIT = 5
+RRF_K = 60
+RERANK_DESCRIPTION_MAX_CHARS = 1200
 RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
@@ -112,6 +116,8 @@ def rerank_system_prompt(candidates: list[dict[str, Any]], expected_count: int) 
         f"{RERANK_SYSTEM_PROMPT}\n\n"
         "FINAL CLOSED-SET INSTRUCTION:\n"
         f"ALLOWED_TECHNIQUE_IDS={json.dumps(allowed_ids)}\n"
+        "Retrieval scores and ranks are hints, not authoritative labels. Judge each "
+        "candidate against its official behavior.\n"
         f"Return exactly {expected_count} candidates. Copy every technique ID verbatim "
         "from ALLOWED_TECHNIQUE_IDS. Any other ID makes the entire response invalid."
     )
@@ -240,6 +246,103 @@ def top_vector_candidates(
     return [{**by_id[technique_id], "vector_score": score} for technique_id, score in ranked]
 
 
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*")
+
+
+def bm25_tokens(text: str) -> list[str]:
+    return TOKEN_PATTERN.findall(text.lower())
+
+
+def bm25_scores(
+    query: str,
+    records: list[dict[str, Any]],
+    *,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> dict[str, float]:
+    """Calculate BM25 Okapi scores over the active ATT&CK corpus."""
+    documents = [bm25_tokens(canonical_attack_document(record)) for record in records]
+    query_terms = set(bm25_tokens(query))
+    if not records or not query_terms:
+        return {str(record["mitre_technique_id"]): 0.0 for record in records}
+    average_length = sum(map(len, documents)) / len(documents)
+    frequencies = [Counter(document) for document in documents]
+    document_frequency = Counter(
+        term for document in documents for term in set(document) if term in query_terms
+    )
+    scores: dict[str, float] = {}
+    for record, document, frequency in zip(records, documents, frequencies, strict=True):
+        score = 0.0
+        for term in query_terms:
+            occurrences = frequency.get(term, 0)
+            if not occurrences:
+                continue
+            count = document_frequency[term]
+            inverse_frequency = math.log(1 + (len(records) - count + 0.5) / (count + 0.5))
+            normalization = occurrences + k1 * (1 - b + b * len(document) / average_length)
+            score += inverse_frequency * occurrences * (k1 + 1) / normalization
+        scores[str(record["mitre_technique_id"])] = score
+    return scores
+
+
+def top_bm25_candidates(
+    records: list[dict[str, Any]],
+    scores: dict[str, float],
+    limit: int = BM25_RETRIEVAL_LIMIT,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        raise ValueError("BM25 retrieval limit must be greater than zero")
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            -scores.get(str(item["mitre_technique_id"]), 0.0),
+            item["mitre_technique_id"],
+        ),
+    )[:limit]
+    return [
+        {**item, "bm25_score": scores.get(str(item["mitre_technique_id"]), 0.0)}
+        for item in ranked
+    ]
+
+
+def combine_candidates(
+    bm25_candidates: list[dict[str, Any]],
+    vector_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deduplicate both lists and use RRF only to order the reranker input."""
+    combined: dict[str, dict[str, Any]] = {}
+    for source, candidates in (("bm25", bm25_candidates), ("vector", vector_candidates)):
+        for rank, candidate in enumerate(candidates, start=1):
+            technique_id = str(candidate["mitre_technique_id"])
+            item = combined.setdefault(
+                technique_id,
+                {
+                    **candidate,
+                    "bm25_rank": None,
+                    "bm25_score": None,
+                    "vector_rank": None,
+                    "vector_score": None,
+                    "rrf_score": 0.0,
+                },
+            )
+            item[f"{source}_rank"] = rank
+            item[f"{source}_score"] = candidate.get(f"{source}_score")
+            item["rrf_score"] += 1 / (RRF_K + rank)
+    return sorted(
+        combined.values(),
+        key=lambda item: (-item["rrf_score"], item["mitre_technique_id"]),
+    )
+
+
+def compact_description(value: object) -> str:
+    """Keep the official defining text while bounding the hybrid reranker payload."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= RERANK_DESCRIPTION_MAX_CHARS:
+        return text
+    boundary = text.rfind(" ", 0, RERANK_DESCRIPTION_MAX_CHARS)
+    return text[: boundary if boundary > 0 else RERANK_DESCRIPTION_MAX_CHARS] + "…"
+
+
 def _extract_json(content: str) -> str:
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", content.strip(), re.DOTALL)
     text = fenced.group(1) if fenced else content
@@ -271,7 +374,7 @@ async def rerank_candidates(
     candidates: list[dict[str, Any]],
     limit: int = RERANK_LIMIT,
 ) -> tuple[list[dict[str, Any]], list[RerankedCandidate]]:
-    """Use FH Genie to order only the supplied vector candidate set."""
+    """Use FH Genie to order only the supplied hybrid candidate set."""
     expected_count = min(limit, len(candidates))
     payload = {
         "exploit_step": step.model_dump(mode="json"),
@@ -279,10 +382,14 @@ async def rerank_candidates(
             {
                 "mitre_technique_id": item["mitre_technique_id"],
                 "name": item.get("name", ""),
-                "description": item.get("description", ""),
+                "description": compact_description(item.get("description", "")),
                 "tactics": item.get("tactics", []),
                 "platforms": item.get("platforms", []),
-                "vector_score": item["vector_score"],
+                "bm25_rank": item.get("bm25_rank"),
+                "bm25_score": item.get("bm25_score"),
+                "vector_rank": item.get("vector_rank"),
+                "vector_score": item.get("vector_score"),
+                "rrf_score": item.get("rrf_score"),
             }
             for item in candidates
         ],
@@ -327,7 +434,9 @@ def save_retrieval_log(
     cve_id: str | None,
     step: ExploitStep,
     query_text: str,
+    bm25_candidates: list[dict[str, Any]],
     vector_candidates: list[dict[str, Any]],
+    combined_candidates: list[dict[str, Any]],
     reranked: list[RerankedCandidate],
 ) -> Path:
     RETRIEVAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -338,6 +447,15 @@ def save_retrieval_log(
         "step": step.step,
         "action": step.action,
         "query_text": query_text,
+        "bm25_candidates": [
+            {
+                "rank": rank,
+                "id": item["mitre_technique_id"],
+                "name": item.get("name", ""),
+                "bm25_score": round(item["bm25_score"], 6),
+            }
+            for rank, item in enumerate(bm25_candidates, start=1)
+        ],
         "vector_candidates": [
             {
                 "rank": rank,
@@ -347,6 +465,17 @@ def save_retrieval_log(
             }
             for rank, item in enumerate(vector_candidates, start=1)
         ],
+        "combined_candidates": [
+            {
+                "rank": rank,
+                "id": item["mitre_technique_id"],
+                "bm25_rank": item.get("bm25_rank"),
+                "vector_rank": item.get("vector_rank"),
+                "rrf_score": round(item["rrf_score"], 6),
+            }
+            for rank, item in enumerate(combined_candidates, start=1)
+        ],
+        "overlap_count": len(bm25_candidates) + len(vector_candidates) - len(combined_candidates),
         "reranked_candidates": [
             {"rank": rank, "id": item.mitre_technique_id, "rerank_score": item.rerank_score}
             for rank, item in enumerate(reranked, start=1)
