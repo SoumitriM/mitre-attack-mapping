@@ -28,7 +28,7 @@ MAPPING_PROMPT_VERSION = "attack-mapping-v4"
 MAPPING_SYSTEM_PROMPT = """
 You map ONE exploit step to MITRE Enterprise ATT&CK.
 
-For this exploit step, you receive up to the TOP 10 MITRE ATT&CK technique
+For this exploit step, you receive up to the TOP 5 MITRE ATT&CK technique
 candidates retrieved using semantic vector search over the official ATT&CK
 technique corpus.
 
@@ -78,7 +78,7 @@ Rules:
 9. If exactly one candidate is strongly supported:
    - return its technique ID,
    - return one valid tactic ID,
-   - confidence MUST be >= 0.75.
+   - confidence MUST be >= 0.50.
 
 10. If none of the supplied candidates cleanly matches the observed behavior:
     - mitre_technique_id = null
@@ -384,7 +384,7 @@ class FHGenieAttackMapper:
                 for item in step.evidence
             ]
 
-            # Expected to contain the top 10 candidates
+            # Expected to contain the top 5 candidates
             # retrieved by semantic vector search.
             step_candidates = candidates.get(
                 step.step,
@@ -760,10 +760,7 @@ class FHGenieAttackMapper:
             return False
 
         # Positive mappings require strong confidence.
-        return mapping.confidence >= max(
-            0.7,
-            self.min_confidence,
-        )
+        return mapping.confidence >= self.min_confidence
 
     def _valid(
         self,

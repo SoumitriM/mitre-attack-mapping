@@ -110,7 +110,7 @@ def test_abandoned_domain_appears_in_top_20_vector_candidates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reranker_returns_exactly_top_10_supplied_candidates() -> None:
+async def test_reranker_returns_exactly_top_5_supplied_candidates() -> None:
     candidates = [{**record(i), "vector_score": 1 - i / 100} for i in range(20)]
     ids = [item["mitre_technique_id"] for item in reversed(candidates[:RERANK_LIMIT])]
     client = MagicMock()
@@ -127,7 +127,7 @@ async def test_reranker_returns_exactly_top_10_supplied_candidates() -> None:
 @pytest.mark.asyncio
 async def test_reranker_rejects_invented_candidate() -> None:
     candidates = [{**record(i), "vector_score": 0.5} for i in range(10)]
-    ids = [item["mitre_technique_id"] for item in candidates[:-1]] + ["T9999"]
+    ids = [item["mitre_technique_id"] for item in candidates[:4]] + ["T9999"]
     client = MagicMock()
     client.chat.completions.create = AsyncMock(return_value=response(ids))
     with pytest.raises(ValueError, match="unsupplied"):

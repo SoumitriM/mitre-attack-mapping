@@ -12,7 +12,7 @@ from app.models import ExploitStep
 
 logger = logging.getLogger(__name__)
 VECTOR_RETRIEVAL_LIMIT = 20
-RERANK_LIMIT = 10
+RERANK_LIMIT = 5
 RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
@@ -23,9 +23,9 @@ category. Do not favor candidates based only on shared keywords. You may use tac
 and platform metadata as context, but never as hard pre-filters. Do not invent or
 retrieve techniques: return only IDs in the supplied candidate list.
 
-Return exactly the 10 best supplied candidates, ordered best to worst. If fewer than
-10 seem plausibly relevant, still return the 10 highest-ranked supplied candidates.
-If fewer than 10 candidates were supplied, return every supplied candidate once.
+Return exactly the 5 best supplied candidates, ordered best to worst. If fewer than
+5 seem plausibly relevant, still return the 5 highest-ranked supplied candidates.
+If fewer than 5 candidates were supplied, return every supplied candidate once.
 Keep each reasoning value to one short sentence so the complete JSON response fits
 within the output limit.
 

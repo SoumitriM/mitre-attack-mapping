@@ -51,6 +51,32 @@ def settings() -> Settings:
     return Settings(_env_file=None, fh_genie_model="test-model")
 
 
+def test_default_acceptance_threshold_is_half() -> None:
+    assert settings().mapping_min_confidence == 0.50
+
+
+@pytest.mark.asyncio
+async def test_accepts_mapping_at_acceptance_threshold() -> None:
+    item = step()
+    ev_id = evidence_id(str(item.evidence[0].source_url), item.evidence[0].supporting_text)
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(
+        return_value=response(
+            '{"mappings":[{"step":1,"action":"Download malicious archive",'
+            '"mitre_technique_id":"T1105","mitre_tactic_id":"TA0011",'
+            '"reasoning":"The archive is transferred to the target.","confidence":0.50,'
+            f'"evidence_ids":["{ev_id}"]}}]}}'
+        )
+    )
+
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(
+        cve(), [item], {1: [candidate()]}
+    )
+
+    assert mappings[0].mitre_technique_id == "T1105"
+    assert mappings[0].confidence == 0.50
+
+
 @pytest.mark.asyncio
 async def test_accepts_only_supplied_platform_compatible_candidate() -> None:
     item = step()
