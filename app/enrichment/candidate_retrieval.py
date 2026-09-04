@@ -18,6 +18,7 @@ RERANK_LIMIT = 5
 RRF_K = 60
 RERANK_DESCRIPTION_MAX_CHARS = 1200
 EMBEDDING_DOCUMENT_MAX_CHARS = 6000
+NORMALIZED_QUERY_MAX_COMPLETION_TOKENS = 2048
 RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
@@ -200,11 +201,33 @@ async def normalized_behavior_query(
             {"role": "user", "content": step.model_dump_json()},
         ],
         temperature=0.0,
-        max_completion_tokens=512,
+        max_completion_tokens=NORMALIZED_QUERY_MAX_COMPLETION_TOKENS,
         extra_body={"reasoning_split": True},
     )
     content = response.choices[0].message.content
     if not content:
+        choice = response.choices[0]
+        message = choice.message
+        reasoning_content = getattr(message, "reasoning_content", None)
+        usage = getattr(response, "usage", None)
+        metadata = {
+            "response_id": getattr(response, "id", None),
+            "model": getattr(response, "model", None),
+            "finish_reason": getattr(choice, "finish_reason", None),
+            "reasoning_content_length": (
+                len(reasoning_content) if isinstance(reasoning_content, str) else 0
+            ),
+            "usage": (
+                usage.model_dump()
+                if usage is not None and hasattr(usage, "model_dump")
+                else None
+            ),
+        }
+        logger.warning(
+            "Empty FH Genie normalized-query response metadata: %s",
+            metadata,
+            extra={"fh_genie_response_metadata": metadata},
+        )
         raise ValueError("Empty FH Genie normalized-query response")
     try:
         envelope = NormalizedQueryEnvelope.model_validate_json(_extract_json(content))

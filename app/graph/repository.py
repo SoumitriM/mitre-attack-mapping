@@ -347,10 +347,16 @@ class GraphRepository:
                     extra={"cve_id": cve_id, "step": step.step, "attempt": attempt + 1},
                 )
         if normalized_behavior is None:
-            raise GraphUnavailable(
-                f"FH Genie behavioral query normalization failed for step {step.step}: "
-                f"{normalization_error}"
-            ) from normalization_error
+            normalized_behavior = behavior
+            logger.warning(
+                "FH Genie behavioral query normalization failed; using raw behavior query",
+                extra={
+                    "cve_id": cve_id,
+                    "step": step.step,
+                    "normalization_error": str(normalization_error),
+                    "raw_behavior_query": behavior,
+                },
+            )
 
         try:
             # Cache ATT&CK technique embeddings. They are regenerated only when the

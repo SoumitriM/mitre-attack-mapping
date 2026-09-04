@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.enrichment.candidate_retrieval import behavior_query
 from app.graph.repository import GraphRepository
 from app.models import (
     AttackMapping,
@@ -246,6 +247,65 @@ async def test_attack_candidates_retry_invalid_reranker_response() -> None:
     )
 
     assert candidates[0].mitre_technique_id == "T1583.001"
+    assert client.chat.completions.create.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_attack_candidates_fall_back_to_raw_query_when_normalization_is_empty() -> None:
+    session = MagicMock()
+    session.run = AsyncMock(
+        return_value=AsyncRecords(
+            [
+                {
+                    "mitre_technique_id": "T1190",
+                    "name": "Exploit Public-Facing Application",
+                    "description": "Exploit a weakness in an Internet-facing host.",
+                    "platforms": ["Network Devices"],
+                    "tactics": [{"name": "initial-access", "id": "TA0001"}],
+                }
+            ]
+        )
+    )
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+    client = MagicMock()
+    client.embeddings.create = AsyncMock(
+        side_effect=[
+            MagicMock(data=[MagicMock(embedding=[1.0, 0.0])]),
+            MagicMock(data=[MagicMock(embedding=[1.0, 0.0])]),
+        ]
+    )
+    empty = MagicMock(choices=[MagicMock(message=MagicMock(content=""))])
+    reranked = MagicMock(choices=[MagicMock(message=MagicMock(content=(
+        '{"candidates":[{"mitre_technique_id":"T1190",'
+        '"reasoning":"The behavior exploits an exposed application.",'
+        '"rerank_score":0.95}]}'
+    )))])
+    client.chat.completions.create = AsyncMock(side_effect=[empty, empty, reranked])
+    item = ExploitStep.model_validate(
+        {
+            "step": 3,
+            "action": "Send an oversized request to the VPN gateway",
+            "outcome": "Remote code execution",
+            "evidence": [
+                {
+                    "source_url": "https://research.example/advisory",
+                    "supporting_text": "The crafted request triggers a buffer overflow.",
+                }
+            ],
+        }
+    )
+
+    candidates = await GraphRepository(driver, client, "embedding-model").attack_candidates(
+        item, ["Network Devices"]
+    )
+
+    raw_query = behavior_query(item)
+    query_request = client.embeddings.create.await_args_list[1].kwargs
+    assert query_request["input"] == [raw_query]
+    assert candidates[0].mitre_technique_id == "T1190"
     assert client.chat.completions.create.await_count == 3
 
 
