@@ -160,6 +160,7 @@ def parse_attack(
             }
 
     techniques_by_id: dict[str, dict[str, Any]] = {}
+    selected_stix_by_external_id: dict[str, str] = {}
     phases_by_id: dict[str, list[dict[str, Any]]] = {}
     for item in objects:
         if item.get("type") != "attack-pattern":
@@ -181,6 +182,7 @@ def parse_attack(
             "platforms": item.get("x_mitre_platforms", []),
             "revoked": bool(item.get("revoked")),
             "deprecated": bool(item.get("x_mitre_deprecated")),
+            "procedure_examples": [],
         }
         current = techniques_by_id.get(external_id)
         current_active = (
@@ -190,6 +192,32 @@ def parse_attack(
         if current is None or (incoming_active and not current_active):
             techniques_by_id[external_id] = technique
             phases_by_id[external_id] = item.get("kill_chain_phases", [])
+            if item.get("id"):
+                selected_stix_by_external_id[external_id] = item["id"]
+
+    technique_external_by_stix_id = {
+        stix_id: external_id
+        for external_id, stix_id in selected_stix_by_external_id.items()
+    }
+
+    source_names = {
+        item["id"]: item.get("name", "Unknown")
+        for item in objects
+        if item.get("id") and item.get("name")
+    }
+    for item in objects:
+        if item.get("type") != "relationship" or item.get("relationship_type") != "uses":
+            continue
+        external_id = technique_external_by_stix_id.get(str(item.get("target_ref", "")))
+        description = str(item.get("description") or "").strip()
+        target_technique = techniques_by_id.get(external_id or "")
+        if target_technique is None or not description or item.get("revoked"):
+            continue
+        source_name = source_names.get(str(item.get("source_ref", "")), "Unknown")
+        target_technique["procedure_examples"].append(f"{source_name}: {description}")
+
+    for technique in techniques_by_id.values():
+        technique["procedure_examples"] = sorted(set(technique["procedure_examples"]))
 
     links = []
     for external_id, phases in phases_by_id.items():
@@ -261,6 +289,7 @@ async def load_taxonomy(settings: Settings, data_root: Path) -> None:
                 await (await session.run(
                     "UNWIND $rows AS row MERGE (n:AttackTechnique {id: row.id}) "
                     "SET n.name=row.name, n.description=row.description, "
+                    "n.procedure_examples=row.procedure_examples, "
                     "n.platforms=row.platforms, n.revoked=row.revoked, "
                     "n.deprecated=row.deprecated, n.source_version='19.1'",
                     rows=techniques[offset : offset + 500],

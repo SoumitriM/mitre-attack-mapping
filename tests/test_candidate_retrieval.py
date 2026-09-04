@@ -9,6 +9,7 @@ from app.enrichment.candidate_retrieval import (
     RERANK_LIMIT,
     VECTOR_RETRIEVAL_LIMIT,
     RerankEnvelope,
+    attack_embedding_documents,
     behavior_query,
     bm25_scores,
     bm25_tokens,
@@ -16,11 +17,13 @@ from app.enrichment.candidate_retrieval import (
     combine_candidates,
     compact_description,
     embedding_cache_key,
+    normalized_behavior_query,
     rerank_candidates,
     rerank_system_prompt,
     save_retrieval_log,
     top_bm25_candidates,
     top_vector_candidates,
+    vector_similarity_scores,
 )
 from app.models import ExploitStep
 
@@ -81,13 +84,38 @@ def test_query_contains_only_atomic_step_fields() -> None:
 
 
 def test_canonical_document_contains_only_authoritative_embedding_fields() -> None:
-    item = {**record(1, "T1583.001"), "cwe": "forbidden", "detection": "forbidden"}
+    item = {
+        **record(1, "T1583.001"),
+        "procedure_examples": ["Example Group registered a domain."],
+        "cwe": "forbidden",
+        "detection": "forbidden",
+    }
     assert canonical_attack_document(item) == (
         "MITRE ATT&CK Technique: T1583.001\nName: Acquire Infrastructure: Domains\n"
         "Tactics: resource-development\nPlatforms: Windows\n"
-        "Description: Adversaries may acquire domains for targeting."
+        "Description: Adversaries may acquire domains for targeting.\n"
+        "Procedure Examples: Example Group registered a domain."
     )
     assert "forbidden" not in canonical_attack_document(item)
+
+
+@pytest.mark.asyncio
+async def test_normalizes_behavior_for_vector_retrieval() -> None:
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                "normalized_query": (
+                    "Exploit an unauthenticated vulnerability in a public-facing application "
+                    "using a crafted request to achieve remote code execution."
+                )
+            })))]
+        )
+    )
+    normalized = await normalized_behavior_query(client, "fh-genie", step())
+    assert normalized.startswith("Exploit an unauthenticated vulnerability")
+    payload = json.loads(client.chat.completions.create.await_args.kwargs["messages"][1]["content"])
+    assert payload["action"] == step().action
 
 
 def test_cache_key_changes_for_every_embedded_field_and_model() -> None:
@@ -101,9 +129,30 @@ def test_cache_key_changes_for_every_embedded_field_and_model() -> None:
             ("description", "Changed"),
             ("platforms", ["Linux"]),
             ("tactics", [{"name": "execution", "id": "TA0002"}]),
+            ("procedure_examples", ["A group used this technique."]),
         )
     ] + [embedding_cache_key(original, "model-b")]
     assert all(item != original_key for item in variants)
+
+
+def test_embedding_documents_preserve_all_procedures_with_bounded_chunks() -> None:
+    procedures = [f"Procedure {index}: " + "behavior " * 200 for index in range(10)]
+    documents = attack_embedding_documents({
+        **record(1, "T1105"),
+        "procedure_examples": procedures,
+    })
+    assert len(documents) > 1
+    assert all(len(document) <= 6000 for document in documents)
+    assert all(procedure.strip() in " ".join(documents) for procedure in procedures)
+
+
+def test_vector_similarity_uses_best_procedure_chunk() -> None:
+    scores = vector_similarity_scores(
+        [1.0, 0.0],
+        [record(1, "T1105")],
+        {"T1105": [[0.0, 1.0], [1.0, 0.0]]},
+    )
+    assert scores["T1105"] == 1.0
 
 
 def test_abandoned_domain_appears_in_top_20_vector_candidates() -> None:
@@ -210,6 +259,7 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
         cve_id="CVE-2026-22306",
         step=step(),
         query_text=behavior_query(step()),
+        normalized_query_text="Acquire control of infrastructure by registering a domain.",
         bm25_candidates=lexical,
         vector_candidates=candidates,
         combined_candidates=combined,
@@ -225,4 +275,6 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
     assert payload["bm25_candidates"][0]["id"] == "T1583.001"
     assert payload["combined_candidates"][0]["id"] == "T1583.001"
     assert payload["overlap_count"] == 1
+    assert payload["raw_bm25_query"] == behavior_query(step())
+    assert payload["normalized_vector_query"].startswith("Acquire control")
     assert payload["reranked_candidates"][0]["id"] == "T1583.001"

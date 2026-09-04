@@ -127,12 +127,17 @@ async def test_attack_candidates_are_semantically_reranked_without_platform_filt
         ]
     )
     embedding_client.chat.completions.create = AsyncMock(
-        return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content=(
-                '{"candidates":[{"mitre_technique_id":"T1105",'
-                '"reasoning":"The behavior transfers a file.","rerank_score":0.9}]}'
-            )))]
-        )
+        side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content=(
+                '{"normalized_query":"Transfer a malicious file from an external system."}'
+            )))]),
+            MagicMock(
+                choices=[MagicMock(message=MagicMock(content=(
+                    '{"candidates":[{"mitre_technique_id":"T1105",'
+                    '"reasoning":"The behavior transfers a file.","rerank_score":0.9}]}'
+                )))]
+            ),
+        ]
     )
     step = ExploitStep.model_validate(
         {
@@ -159,6 +164,7 @@ async def test_attack_candidates_are_semantically_reranked_without_platform_filt
     assert "OPTIONAL MATCH (technique)-[:HAS_TACTIC]" in query
     assert "technique.revoked = false" not in query
     assert "technique.platforms" not in query.split("RETURN")[0]
+    assert "technique.procedure_examples" in query
     assert embedding_client.embeddings.create.await_count == 2
     embedding_request = embedding_client.embeddings.create.await_args_list[0].kwargs
     assert embedding_request["model"] == "test-embedding-model"
@@ -166,7 +172,11 @@ async def test_attack_candidates_are_semantically_reranked_without_platform_filt
     technique_document = embedding_request["input"][0]
     assert technique_document.startswith("MITRE ATT&CK Technique: T1105")
     assert "Tactics: command-and-control" in technique_document
-    assert embedding_client.chat.completions.create.await_count == 1
+    query_request = embedding_client.embeddings.create.await_args_list[1].kwargs
+    assert query_request["input"] == [
+        "Transfer a malicious file from an external system."
+    ]
+    assert embedding_client.chat.completions.create.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -198,6 +208,9 @@ async def test_attack_candidates_retry_invalid_reranker_response() -> None:
     )
     client.chat.completions.create = AsyncMock(
         side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(content=(
+                '{"normalized_query":"Acquire infrastructure by registering a domain."}'
+            )))]),
             MagicMock(choices=[MagicMock(message=MagicMock(content="not json"))]),
             MagicMock(
                 choices=[
@@ -233,7 +246,7 @@ async def test_attack_candidates_retry_invalid_reranker_response() -> None:
     )
 
     assert candidates[0].mitre_technique_id == "T1583.001"
-    assert client.chat.completions.create.await_count == 2
+    assert client.chat.completions.create.await_count == 3
 
 
 @pytest.mark.asyncio

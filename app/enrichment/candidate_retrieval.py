@@ -17,6 +17,7 @@ BM25_RETRIEVAL_LIMIT = 20
 RERANK_LIMIT = 5
 RRF_K = 60
 RERANK_DESCRIPTION_MAX_CHARS = 1200
+EMBEDDING_DOCUMENT_MAX_CHARS = 6000
 RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
@@ -156,6 +157,22 @@ class RerankEnvelope(BaseModel):
     candidates: list[RerankedCandidate]
 
 
+class NormalizedQueryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    normalized_query: str = Field(min_length=1)
+
+
+NORMALIZED_QUERY_SYSTEM_PROMPT = """
+Rewrite one exploit step as one concise, implementation-neutral ATT&CK-style attacker behavior.
+Use only facts supported by the supplied action, prerequisites, outcome, and evidence.
+Abstract product names, endpoint paths, parameter names, payload syntax, and code identifiers into
+their security meaning when possible. Preserve stated access conditions, target exposure,
+mechanism, and outcome. Do not add tactics, ATT&CK technique IDs, candidate techniques, unstated
+public exposure, or unstated post-exploitation behavior. Return JSON only:
+{"normalized_query":"..."}
+""".strip()
+
+
 def behavior_query(step: ExploitStep) -> str:
     """Build the embedding query from raw atomic-step fields only."""
     return " ".join(
@@ -170,6 +187,32 @@ def behavior_query(step: ExploitStep) -> str:
     ).strip()
 
 
+async def normalized_behavior_query(
+    client: RerankClient,
+    model: str,
+    step: ExploitStep,
+) -> str:
+    """Generate an evidence-bounded behavioral abstraction for vector retrieval."""
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": NORMALIZED_QUERY_SYSTEM_PROMPT},
+            {"role": "user", "content": step.model_dump_json()},
+        ],
+        temperature=0.0,
+        max_completion_tokens=512,
+        extra_body={"reasoning_split": True},
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("Empty FH Genie normalized-query response")
+    try:
+        envelope = NormalizedQueryEnvelope.model_validate_json(_extract_json(content))
+    except (ValueError, ValidationError) as exc:
+        raise ValueError(f"Invalid FH Genie normalized-query response: {exc}") from exc
+    return " ".join(envelope.normalized_query.split())
+
+
 def canonical_attack_document(record: dict[str, Any]) -> str:
     """Build the sole canonical representation used for ATT&CK embeddings."""
     tactics = record.get("tactics") or []
@@ -177,6 +220,7 @@ def canonical_attack_document(record: dict[str, Any]) -> str:
         str(item.get("name") or "") if isinstance(item, dict) else str(item) for item in tactics
     ]
     platforms = [str(item) for item in (record.get("platforms") or [])]
+    procedures = [str(item) for item in (record.get("procedure_examples") or [])]
     return "\n".join(
         (
             f"MITRE ATT&CK Technique: {record.get('mitre_technique_id') or ''}",
@@ -184,8 +228,53 @@ def canonical_attack_document(record: dict[str, Any]) -> str:
             f"Tactics: {', '.join(filter(None, tactic_names))}",
             f"Platforms: {', '.join(platforms)}",
             f"Description: {record.get('description') or ''}",
+            f"Procedure Examples: {' '.join(procedures)}",
         )
     )
+
+
+def attack_embedding_documents(record: dict[str, Any]) -> list[str]:
+    """Chunk a canonical technique document without dropping procedure examples."""
+    document = canonical_attack_document(record)
+    if len(document) <= EMBEDDING_DOCUMENT_MAX_CHARS:
+        return [document]
+    tactics = record.get("tactics") or []
+    tactic_names = [
+        str(item.get("name") or "") if isinstance(item, dict) else str(item)
+        for item in tactics
+    ]
+    prefix = "\n".join(
+        (
+            f"MITRE ATT&CK Technique: {record.get('mitre_technique_id') or ''}",
+            f"Name: {record.get('name') or ''}",
+            f"Tactics: {', '.join(filter(None, tactic_names))}",
+            f"Platforms: {', '.join(str(item) for item in record.get('platforms') or [])}",
+        )
+    ) + "\n"
+    capacity = EMBEDDING_DOCUMENT_MAX_CHARS - len(prefix)
+    segments = [
+        f"Description: {record.get('description') or ''}",
+        *(f"Procedure Example: {item}" for item in record.get("procedure_examples") or []),
+    ]
+    chunks: list[str] = []
+    current = ""
+    for segment in segments:
+        if len(segment) > capacity:
+            if current:
+                chunks.append(prefix + current)
+                current = ""
+            chunks.extend(
+                prefix + segment[offset : offset + capacity]
+                for offset in range(0, len(segment), capacity)
+            )
+        elif current and len(current) + 1 + len(segment) > capacity:
+            chunks.append(prefix + current)
+            current = segment
+        else:
+            current = f"{current}\n{segment}" if current else segment
+    if current:
+        chunks.append(prefix + current)
+    return chunks
 
 
 def embedding_cache_key(record: dict[str, Any], model: str) -> str:
@@ -218,12 +307,14 @@ async def embed_texts(
 def vector_similarity_scores(
     query_vector: list[float],
     records: list[dict[str, Any]],
-    technique_vectors: dict[str, list[float]],
+    technique_vectors: dict[str, list[list[float]]],
 ) -> dict[str, float]:
     return {
-        record["mitre_technique_id"]: vector_cosine(query_vector, vector)
+        record["mitre_technique_id"]: max(
+            vector_cosine(query_vector, vector) for vector in vectors
+        )
         for record in records
-        if (vector := technique_vectors.get(record["mitre_technique_id"])) is not None
+        if (vectors := technique_vectors.get(record["mitre_technique_id"]))
     }
 
 
@@ -434,6 +525,7 @@ def save_retrieval_log(
     cve_id: str | None,
     step: ExploitStep,
     query_text: str,
+    normalized_query_text: str,
     bm25_candidates: list[dict[str, Any]],
     vector_candidates: list[dict[str, Any]],
     combined_candidates: list[dict[str, Any]],
@@ -447,6 +539,8 @@ def save_retrieval_log(
         "step": step.step,
         "action": step.action,
         "query_text": query_text,
+        "raw_bm25_query": query_text,
+        "normalized_vector_query": normalized_query_text,
         "bm25_candidates": [
             {
                 "rank": rank,

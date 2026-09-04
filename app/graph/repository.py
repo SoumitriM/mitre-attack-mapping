@@ -14,12 +14,13 @@ from app.enrichment.candidate_retrieval import (
     VECTOR_RETRIEVAL_LIMIT,
     EmbeddingClient,
     RerankClient,
+    attack_embedding_documents,
     behavior_query,
     bm25_scores,
-    canonical_attack_document,
     combine_candidates,
     embed_texts,
     embedding_cache_key,
+    normalized_behavior_query,
     rerank_candidates,
     save_retrieval_log,
     top_bm25_candidates,
@@ -79,7 +80,7 @@ class GraphRepository:
         self._embedding_model = embedding_model
         self._rerank_client = rerank_client or cast(RerankClient | None, embedding_client)
         self._rerank_model = rerank_model or embedding_model
-        self._technique_embeddings: dict[str, tuple[str, list[float]]] = {}
+        self._technique_embeddings: dict[str, tuple[str, list[list[float]]]] = {}
         self._embedding_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -312,6 +313,7 @@ class GraphRepository:
         WITH technique, collect(DISTINCT {name: tactic.short_name, id: tactic.id}) AS tactics
         RETURN technique.id AS mitre_technique_id, technique.name AS name,
                technique.description AS description, technique.platforms AS platforms,
+               technique.procedure_examples AS procedure_examples,
                technique.revoked AS revoked, tactics
         ORDER BY technique.id
         """
@@ -330,39 +332,63 @@ class GraphRepository:
         if self._rerank_client is None or self._rerank_model is None:
             raise GraphUnavailable("FH Genie ATT&CK reranking is not configured")
 
+        normalized_behavior: str | None = None
+        normalization_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                normalized_behavior = await normalized_behavior_query(
+                    self._rerank_client, self._rerank_model, step
+                )
+                break
+            except Exception as exc:
+                normalization_error = exc
+                logger.warning(
+                    "FH Genie behavioral query normalization attempt failed",
+                    extra={"cve_id": cve_id, "step": step.step, "attempt": attempt + 1},
+                )
+        if normalized_behavior is None:
+            raise GraphUnavailable(
+                f"FH Genie behavioral query normalization failed for step {step.step}: "
+                f"{normalization_error}"
+            ) from normalization_error
+
         try:
             # Cache ATT&CK technique embeddings. They are regenerated only when the
             # searchable ATT&CK text changes.
             async with self._embedding_lock:
-                missing: list[tuple[dict[str, Any], str]] = []
+                missing: list[tuple[dict[str, Any], list[str]]] = []
                 for record in records:
                     technique_id = record["mitre_technique_id"]
-                    attack_text = canonical_attack_document(record)
                     cache_key = embedding_cache_key(record, self._embedding_model)
                     cached = self._technique_embeddings.get(technique_id)
                     if cached is None or cached[0] != cache_key:
-                        missing.append((record, attack_text))
+                        missing.append((record, attack_embedding_documents(record)))
 
                 if missing:
-                    texts = [text for _, text in missing]
+                    texts = [text for _, documents in missing for text in documents]
                     vectors = await embed_texts(
                         self._embedding_client,
                         self._embedding_model,
                         texts,
                     )
-                    for (record, _), vector in zip(missing, vectors, strict=True):
+                    vector_offset = 0
+                    for record, documents in missing:
+                        record_vectors = vectors[
+                            vector_offset : vector_offset + len(documents)
+                        ]
+                        vector_offset += len(documents)
                         self._technique_embeddings[record["mitre_technique_id"]] = (
                             embedding_cache_key(record, self._embedding_model),
-                            vector,
+                            record_vectors,
                         )
 
-            # Embed the raw exploit-step behavior only. No inferred tactics,
-            # platform boosts, taxonomy keywords, aliases, or hand-written concepts.
+            # Embed the evidence-bounded behavioral abstraction. BM25 continues to
+            # use the raw exploit-step behavior below.
             query_vector = (
                 await embed_texts(
                     self._embedding_client,
                     self._embedding_model,
-                    [behavior],
+                    [normalized_behavior],
                 )
             )[0]
 
@@ -417,6 +443,7 @@ class GraphRepository:
             cve_id=cve_id,
             step=step,
             query_text=behavior,
+            normalized_query_text=normalized_behavior,
             bm25_candidates=lexical_candidates,
             vector_candidates=vector_candidates,
             combined_candidates=combined_candidates,
@@ -430,6 +457,7 @@ class GraphRepository:
                 "step": step.step,
                 "action": step.action,
                 "behavior_query": behavior,
+                "normalized_behavior_query": normalized_behavior,
                 "vector_candidate_count": len(vector_candidates),
                 "bm25_candidate_count": len(lexical_candidates),
                 "combined_candidate_count": len(combined_candidates),
