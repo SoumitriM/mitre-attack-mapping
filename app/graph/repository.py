@@ -870,7 +870,7 @@ class GraphRepository:
 
     async def subgraph(self, cve_id: str) -> EvidenceSubgraph:
         query = """
-        MATCH path=(cve:CVE {id: $cve_id})-[*0..3]-(node)
+        MATCH path=(cve:CVE {id: $cve_id})-[*0..3]->(node)
         WHERE all(rel IN relationships(path) WHERE type(rel) IN
           ['HAS_WEAKNESS','RELATED_TO_CAPEC','HAS_ATTACK_PATTERN','AFFECTS',
            'RUNS_ON','HAS_COMPONENT','REFERENCES','CONTAINS','HAS_EXPLOIT_STEP',

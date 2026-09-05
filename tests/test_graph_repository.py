@@ -99,6 +99,26 @@ async def test_zero_ttl_always_bypasses_cve_cache() -> None:
 
 
 @pytest.mark.asyncio
+async def test_subgraph_does_not_traverse_back_into_cves_sharing_a_weakness() -> None:
+    result = MagicMock()
+    result.single = AsyncMock(return_value=None)
+    session = MagicMock()
+    session.run = AsyncMock(return_value=result)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+
+    subgraph = await GraphRepository(driver).subgraph("CVE-2026-63077")
+
+    assert subgraph.nodes == []
+    query = session.run.await_args.args[0]
+    assert "-[*0..3]->(node)" in query
+    assert "-[*0..3]-(node)" not in query
+    assert session.run.await_args.kwargs == {"cve_id": "CVE-2026-63077"}
+
+
+@pytest.mark.asyncio
 async def test_attack_candidates_are_semantically_reranked_without_platform_filter() -> None:
     session = MagicMock()
     session.run = AsyncMock(
