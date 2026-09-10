@@ -3,6 +3,7 @@ name: mitre-attack-chain
 services:
   neo4j:
     image: neo4j:5.26-community
+    restart: unless-stopped
     environment:
       NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
     ports:
