@@ -17,6 +17,12 @@ from app.enrichment.attack_mapper import (
     FHGenieAttackMapper,
     MappingResponseError,
 )
+from app.enrichment.ctid_mapper import (
+    CTID_PROMPT_VERSION,
+    CTIDMappingError,
+    FHGenieCTIDCVEMapper,
+    unmapped_ctid_mappings,
+)
 from app.enrichment.fh_genie import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -31,7 +37,7 @@ from app.enrichment.validation_agent import (
     ValidationResponseError,
     unvalidated_chain,
 )
-from app.graph.repository import GraphRepository
+from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
     AdvisoryResult,
@@ -53,6 +59,7 @@ class CVEAnalysisService:
         agent: FHGenieEvidenceAgent | None = None,
         mapper: FHGenieAttackMapper | None = None,
         validator: FHGenieValidationAgent | None = None,
+        ctid_mapper: FHGenieCTIDCVEMapper | None = None,
     ) -> None:
         self.settings = settings
         self.graph = graph
@@ -60,6 +67,7 @@ class CVEAnalysisService:
         self.agent = agent
         self.mapper = mapper
         self.validator = validator
+        self.ctid_mapper = ctid_mapper
 
     async def analyze(self, cve_id: str) -> CVEAnalysis:
         normalized_id = normalize_cve_id(cve_id)
@@ -260,6 +268,33 @@ class CVEAnalysisService:
                 ),
                 validation_prompt_version=VALIDATION_PROMPT_VERSION,
             )
+        cve_level_mappings = unmapped_ctid_mappings(
+            "No evidence-supported exploit steps were available for CTID CVE-level mapping."
+        )
+        if steps and (self.ctid_mapper is None or self.mapper is None or self.validator is None):
+            warnings.append("FH Genie CTID CVE-level mapper is not configured")
+            cve_level_mappings = unmapped_ctid_mappings(
+                "The CTID CVE-level mapping stage was unavailable."
+            )
+        elif steps and self.ctid_mapper and self.mapper and self.validator:
+            try:
+                cve_level_mappings = await self.ctid_mapper.map(
+                    cve, steps, self.graph, self.mapper, self.validator
+                )
+            except (CTIDMappingError, GraphUnavailable) as exc:
+                warnings.append(str(exc))
+                cve_level_mappings = unmapped_ctid_mappings(
+                    "The CTID CVE-level mapping stage failed closed."
+                )
+        try:
+            await self.graph.replace_cve_level_attack_mappings(
+                cve.cve_id,
+                cve_level_mappings,
+                model=self.ctid_mapper.model if self.ctid_mapper else "unconfigured",
+                prompt_version=CTID_PROMPT_VERSION,
+            )
+        except GraphUnavailable as exc:
+            warnings.append(str(exc))
         subgraph = await self.graph.subgraph(cve.cve_id)
         return CVEAnalysis(
             cve=cve,
@@ -268,6 +303,7 @@ class CVEAnalysisService:
             exploit_steps=steps,
             attack_mappings=mappings,
             attack_chain=attack_chain,
+            cve_level_attack_mappings=cve_level_mappings,
             subgraph=subgraph,
             warnings=list(dict.fromkeys(warnings)),
         )

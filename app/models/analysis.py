@@ -113,6 +113,47 @@ class AttackMappingEnvelope(BaseModel):
     mappings: list[AttackMapping]
 
 
+class CVEAttackMappingCategory(StrEnum):
+    EXPLOITATION_TECHNIQUE = "exploitation_technique"
+    PRIMARY_IMPACT = "primary_impact"
+    SECONDARY_IMPACT = "secondary_impact"
+
+
+class CVEAttackBehavior(BaseModel):
+    """One evidence-bounded CTID methodology category before ATT&CK mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: CVEAttackMappingCategory
+    action: str | None = None
+    prerequisites: list[str] = Field(default_factory=list)
+    outcome: str | None = None
+    evidence: list[StepEvidence] = Field(default_factory=list)
+    reasoning: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def supported_behavior_is_complete(self) -> "CVEAttackBehavior":
+        populated = self.action is not None
+        if populated != (self.outcome is not None) or populated != bool(self.evidence):
+            raise ValueError("a CTID behavior requires action, outcome, and evidence together")
+        if not populated and self.prerequisites:
+            raise ValueError("an unsupported CTID behavior cannot have prerequisites")
+        return self
+
+
+class CVEAttackBehaviorEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    behaviors: list[CVEAttackBehavior]
+
+    @model_validator(mode="after")
+    def contains_each_category_once(self) -> "CVEAttackBehaviorEnvelope":
+        expected = list(CVEAttackMappingCategory)
+        if [item.category for item in self.behaviors] != expected:
+            raise ValueError("CTID behaviors must contain the three categories in order")
+        return self
+
+
 class ValidationStatus(StrEnum):
     VALIDATED = "validated"
     UNMAPPED = "unmapped"
@@ -156,6 +197,34 @@ class ValidatedAttackStep(BaseModel):
                 raise ValueError("validated steps require ATT&CK IDs and evidence IDs")
         elif self.proposed_technique_id is not None or self.validation.validator_confidence > 0.33:
             raise ValueError("unmapped steps require null IDs and low confidence")
+        return self
+
+
+class CVELevelAttackMapping(BaseModel):
+    """Final mapping for one CTID CVE-level category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: CVEAttackMappingCategory
+    action: str | None = None
+    mitre_technique_id: str | None = None
+    mitre_tactic_id: str | None = None
+    reasoning: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    validation: ValidationDetails | None = None
+
+    @model_validator(mode="after")
+    def mapping_is_consistent(self) -> "CVELevelAttackMapping":
+        if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
+            raise ValueError("technique and tactic IDs must both be present or null")
+        if self.mitre_technique_id is not None:
+            if self.action is None or not self.evidence_ids or self.validation is None:
+                raise ValueError("mapped CVE categories require action, evidence, and validation")
+            if self.validation.status != ValidationStatus.VALIDATED:
+                raise ValueError("mapped CVE categories must be validated")
+        elif self.confidence > 0.33:
+            raise ValueError("unmapped CVE categories must have low confidence")
         return self
 
 
@@ -231,5 +300,6 @@ class CVEAnalysis(BaseModel):
     exploit_steps: list[ExploitStep] = Field(default_factory=list)
     attack_mappings: list[AttackMapping] = Field(default_factory=list)
     attack_chain: list[ValidatedAttackStep] = Field(default_factory=list)
+    cve_level_attack_mappings: list[CVELevelAttackMapping] = Field(default_factory=list)
     subgraph: EvidenceSubgraph = Field(default_factory=EvidenceSubgraph)
     warnings: list[str] = Field(default_factory=list)

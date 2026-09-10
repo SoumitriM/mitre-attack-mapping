@@ -9,6 +9,7 @@ from app.analysis import CVEAnalysisService
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.candidate_retrieval import EmbeddingClient
+from app.enrichment.ctid_mapper import FHGenieCTIDCVEMapper
 from app.enrichment.fh_genie import FHGenieEvidenceAgent
 from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
@@ -60,10 +61,12 @@ async def analyze(request: AnalyzeRequest) -> CVEAnalysis:
             agent = FHGenieEvidenceAgent(settings)
             mapper = FHGenieAttackMapper(settings, agent.client)
             validator = FHGenieValidationAgent(settings, agent.client)
+            ctid_mapper = FHGenieCTIDCVEMapper(mapper.model, agent.client)
         except ValueError:
             agent = None
             mapper = None
             validator = None
+            ctid_mapper = None
         graph = GraphRepository(
             driver,
             cast(EmbeddingClient, agent.client) if agent else None,
@@ -74,7 +77,7 @@ async def analyze(request: AnalyzeRequest) -> CVEAnalysis:
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
             return await CVEAnalysisService(
-                settings, graph, client, agent, mapper, validator
+                settings, graph, client, agent, mapper, validator, ctid_mapper
             ).analyze(request.cve_id)
     except InvalidCVEID as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

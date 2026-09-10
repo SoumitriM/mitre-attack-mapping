@@ -31,6 +31,7 @@ from app.models import (
     AttackCandidate,
     AttackChainGraph,
     AttackMapping,
+    CVELevelAttackMapping,
     CVERecord,
     EvidenceSubgraph,
     ExploitStep,
@@ -523,6 +524,59 @@ class GraphRepository:
                 ).consume()
         except Exception as exc:
             raise GraphUnavailable("Neo4j ATT&CK mapping update failed") from exc
+
+    async def replace_cve_level_attack_mappings(
+        self,
+        cve_id: str,
+        mappings: list[CVELevelAttackMapping],
+        *,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        """Replace the additive CTID CVE-level mapping nodes and relationships."""
+        query = """
+        MATCH (cve:CVE {id: $cve_id})
+        OPTIONAL MATCH (cve)-[:HAS_CVE_ATTACK_MAPPING]->(old:CVEAttackMapping)
+        DETACH DELETE old
+        WITH cve
+        UNWIND $mappings AS item
+        CREATE (mapping:CVEAttackMapping {
+          id: $cve_id + ':' + item.category,
+          category: item.category,
+          action: item.action,
+          reasoning: item.reasoning,
+          confidence: item.confidence,
+          tactic_id: item.mitre_tactic_id,
+          evidence_ids: item.evidence_ids,
+          validation_status: item.validation.status,
+          model: $model,
+          prompt_version: $prompt_version
+        })
+        MERGE (cve)-[:HAS_CVE_ATTACK_MAPPING]->(mapping)
+        WITH mapping, item
+        OPTIONAL MATCH (technique:AttackTechnique {id: item.mitre_technique_id})
+        FOREACH (_ IN CASE WHEN technique IS NULL THEN [] ELSE [1] END |
+          MERGE (mapping)-[:MAPS_TO]->(technique))
+        WITH mapping, item
+        UNWIND CASE WHEN item.evidence_ids = [] THEN [null]
+                    ELSE item.evidence_ids END AS evidence_id
+        OPTIONAL MATCH (evidence:Evidence {id: evidence_id})
+        FOREACH (_ IN CASE WHEN evidence IS NULL THEN [] ELSE [1] END |
+          MERGE (mapping)-[:SUPPORTED_BY]->(evidence))
+        """
+        try:
+            async with self._driver.session() as session:
+                await (
+                    await session.run(
+                        query,
+                        cve_id=cve_id,
+                        mappings=[item.model_dump(mode="json") for item in mappings],
+                        model=model,
+                        prompt_version=prompt_version,
+                    )
+                ).consume()
+        except Exception as exc:
+            raise GraphUnavailable("Neo4j CVE-level ATT&CK mapping update failed") from exc
 
     async def official_attack_context(self, technique_ids: list[str]) -> dict[str, AttackCandidate]:
         if not technique_ids:

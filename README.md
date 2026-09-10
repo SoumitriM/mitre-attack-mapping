@@ -8,7 +8,8 @@ independent validation, and Neo4j provenance.
 
 Implemented: normalized CVE metadata, pinned CWE/CAPEC/Enterprise ATT&CK synchronization,
 trusted advisory retrieval, evidence-linked exploit-step extraction, bounded ATT&CK mapping,
-independent validation, final ordered attack-chain generation, Neo4j storage, FastAPI, and CLI.
+independent validation, final ordered attack-chain generation, additive CTID CVE-level mappings,
+Neo4j storage, FastAPI, and CLI.
 
 ## Requirements and installation
 
@@ -76,6 +77,14 @@ and CVSS constraints. Only validated mappings remain connected with `MAPS_TO`; w
 contradictory, unavailable, and exact duplicate mappings are returned with null IDs and an
 explanation. The original exploit step always remains, and validation cannot add steps or infer
 post-exploitation behavior.
+
+`cve_level_attack_mappings` is an additional result following CTID's CVE Mapping Methodology. It
+always represents the Exploitation Technique, Primary Impact, and Secondary Impact categories in
+that order. Each category is derived only from evidence already attached to the extracted steps,
+then passed through the same hybrid ATT&CK retrieval, closed-set reranking, mapping, and independent
+validation used by the step pipeline. Unsupported categories remain explicitly unmapped. This
+stage does not use deterministic CWE, CAPEC, CVSS, vulnerability-class, or keyword-to-technique
+rules, and it does not modify `attack_chain`.
 
 ## Quality checks
 

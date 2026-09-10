@@ -8,6 +8,8 @@ from app.enrichment.candidate_retrieval import behavior_query
 from app.graph.repository import GraphRepository
 from app.models import (
     AttackMapping,
+    CVEAttackMappingCategory,
+    CVELevelAttackMapping,
     CVERecord,
     ExploitStep,
     SourceAttribution,
@@ -362,6 +364,36 @@ async def test_mapping_edge_records_model_prompt_reasoning_and_confidence() -> N
     assert "edge.reasoning = mapping.reasoning" in query
     assert parameters["model"] == "fh-model"
     assert parameters["mappings"][0]["confidence"] == 0.91
+
+
+@pytest.mark.asyncio
+async def test_cve_level_mapping_storage_is_additive_and_keeps_null_categories() -> None:
+    result = MagicMock()
+    result.consume = AsyncMock()
+    session = MagicMock()
+    session.run = AsyncMock(return_value=result)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+    mapping = CVELevelAttackMapping(
+        category=CVEAttackMappingCategory.PRIMARY_IMPACT,
+        action="The attacker obtains credentials",
+        reasoning="No official candidate was sufficiently supported.",
+        confidence=0.2,
+        evidence_ids=["evidence-1"],
+    )
+
+    await GraphRepository(driver).replace_cve_level_attack_mappings(
+        "CVE-2026-22306", [mapping], model="fh-model", prompt_version="ctid-v1"
+    )
+
+    query = session.run.await_args.args[0]
+    parameters = session.run.await_args.kwargs
+    assert "HAS_CVE_ATTACK_MAPPING" in query
+    assert "HAS_EXPLOIT_STEP" not in query
+    assert parameters["mappings"][0]["mitre_technique_id"] is None
+    assert parameters["mappings"][0]["evidence_ids"] == ["evidence-1"]
 
 
 @pytest.mark.asyncio
