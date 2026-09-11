@@ -8,8 +8,8 @@ from app.enrichment.candidate_retrieval import behavior_query
 from app.graph.repository import GraphRepository
 from app.models import (
     AttackMapping,
-    CVEAttackMappingCategory,
     CVELevelAttackMapping,
+    CVELevelAttackMappings,
     CVERecord,
     ExploitStep,
     SourceAttribution,
@@ -62,8 +62,8 @@ async def test_graph_upsert_uses_cve_id_parameter() -> None:
         prompt_version="v1",
     )
 
-    query = session.run.await_args.args[0]
-    parameters = session.run.await_args.kwargs
+    query = session.run.await_args_list[0].args[0]
+    parameters = session.run.await_args_list[0].kwargs
     assert "MERGE (cve:CVE {id: $cve.cve_id})" in query
     assert parameters["cve"]["cve_id"] == "CVE-2026-22306"
     assert parameters["record_json"] == record.model_dump_json()
@@ -131,6 +131,7 @@ async def test_attack_candidates_are_semantically_reranked_without_platform_filt
                     "name": "Ingress Tool Transfer",
                     "description": "Transfer files from an external system.",
                     "platforms": ["Windows"],
+                    "procedure_examples": [],
                     "tactics": [{"name": "command-and-control", "id": "TA0011"}],
                     "score": 2,
                     "primary_match": True,
@@ -433,7 +434,7 @@ async def test_cve_level_mapping_storage_is_additive_and_keeps_null_categories()
     driver = MagicMock()
     driver.session.return_value = context
     mapping = CVELevelAttackMapping(
-        category=CVEAttackMappingCategory.PRIMARY_IMPACT,
+        id="PI-1",
         action="The attacker obtains credentials",
         reasoning="No official candidate was sufficiently supported.",
         confidence=0.2,
@@ -441,15 +442,19 @@ async def test_cve_level_mapping_storage_is_additive_and_keeps_null_categories()
     )
 
     await GraphRepository(driver).replace_cve_level_attack_mappings(
-        "CVE-2026-22306", [mapping], model="fh-model", prompt_version="ctid-v1"
+        "CVE-2026-22306",
+        CVELevelAttackMappings(primary_impacts=[mapping]),
+        model="fh-model",
+        prompt_version="ctid-v1",
     )
 
-    query = session.run.await_args.args[0]
-    parameters = session.run.await_args.kwargs
+    query = session.run.await_args_list[0].args[0]
+    parameters = session.run.await_args_list[0].kwargs
     assert "HAS_CVE_ATTACK_MAPPING" in query
     assert "HAS_EXPLOIT_STEP" not in query
     assert parameters["mappings"][0]["mitre_technique_id"] is None
     assert parameters["mappings"][0]["evidence_ids"] == ["evidence-1"]
+    assert "ENABLED_BY" in session.run.await_args_list[1].args[0]
 
 
 @pytest.mark.asyncio
@@ -463,6 +468,7 @@ async def test_official_attack_context_excludes_unavailable_techniques() -> None
                     "name": "Ingress Tool Transfer",
                     "description": "Transfer files from an external system.",
                     "platforms": ["Windows"],
+                    "procedure_examples": [],
                     "tactics": [{"name": "command-and-control", "id": "TA0011"}],
                 }
             ]

@@ -9,6 +9,7 @@ from app.models import (
     AffectedProduct,
     AttackCandidate,
     AttackMapping,
+    CVEAttackBehaviorEnvelope,
     CVERecord,
     ExploitStep,
     ValidatedAttackStep,
@@ -51,19 +52,39 @@ def step() -> ExploitStep:
 
 def behavior_response(evidence_text: str) -> str:
     return (
-        '{"behaviors":['
-        '{"category":"exploitation_technique",'
+        '{"exploitation_techniques":['
+        '{"id":"ET-1",'
         '"action":"The client downloads an attacker-controlled archive",'
         '"prerequisites":["The update endpoint is attacker-controlled"],'
-        '"outcome":"The archive reaches the host","evidence":['
+        '"outcome":"The archive reaches the host","enabled_by":[],"evidence":['
         '{"source_url":"https://research.example/advisory",'
         f'"supporting_text":"{evidence_text}"}}],'
-        '"reasoning":"The evidence states the delivery method."},'
-        '{"category":"primary_impact","action":null,"prerequisites":[],'
-        '"outcome":null,"evidence":[],"reasoning":"No initial benefit is stated."},'
-        '{"category":"secondary_impact","action":null,"prerequisites":[],'
-        '"outcome":null,"evidence":[],"reasoning":"No enabled later behavior is stated."}]}'
+        '"reasoning":"The evidence states the delivery method."}],'
+        '"primary_impacts":[],"secondary_impacts":[]}'
     )
+
+
+def test_multiple_stage_items_and_causal_links_are_supported() -> None:
+    evidence = {
+        "source_url": "https://research.example/advisory",
+        "supporting_text": "The client downloads the malicious archive.",
+    }
+    common = {"prerequisites": [], "outcome": "Observed outcome", "evidence": [evidence],
+              "reasoning": "Directly supported."}
+    envelope = CVEAttackBehaviorEnvelope.model_validate({
+        "exploitation_techniques": [
+            {"id": "ET-1", "action": "First method", "enabled_by": [], **common},
+            {"id": "ET-2", "action": "Second method", "enabled_by": [], **common},
+        ],
+        "primary_impacts": [
+            {"id": "PI-1", "action": "Immediate capability", "enabled_by": [], **common}
+        ],
+        "secondary_impacts": [
+            {"id": "SI-1", "action": "Enabled behavior", "enabled_by": ["PI-1"], **common}
+        ],
+    })
+    assert len(envelope.exploitation_techniques) == 2
+    assert envelope.secondary_impacts[0].enabled_by == ["PI-1"]
 
 
 @pytest.mark.asyncio
@@ -75,13 +96,9 @@ async def test_identifies_all_categories_and_preserves_explicit_nulls() -> None:
 
     behaviors = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
 
-    assert [item.category.value for item in behaviors] == [
-        "exploitation_technique",
-        "primary_impact",
-        "secondary_impact",
-    ]
-    assert behaviors[0].action is not None
-    assert behaviors[1].action is None
+    assert len(behaviors.exploitation_techniques) == 1
+    assert behaviors.primary_impacts == []
+    assert behaviors.secondary_impacts == []
     payload = api.chat.completions.create.await_args.kwargs["messages"][1]["content"]
     assert "CWE-494" not in payload
     assert "CAPEC-187" not in payload
@@ -164,9 +181,8 @@ async def test_maps_supported_categories_through_existing_retrieval_and_validato
         cve(), [item], graph, mapper, validator
     )
 
-    assert len(mappings) == 3
-    assert mappings[0].mitre_technique_id == "T1105"
-    assert mappings[1].mitre_technique_id is None
+    assert mappings.exploitation_techniques[0].mitre_technique_id == "T1105"
+    assert mappings.primary_impacts == []
     graph.attack_candidates.assert_awaited_once()
     mapper.map_steps.assert_awaited_once()
     validator.validate.assert_awaited_once()

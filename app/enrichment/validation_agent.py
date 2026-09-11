@@ -40,6 +40,11 @@ Validate these checks independently:
 - evidence_support
 - semantic_match
 
+Official procedure examples are strong evidence about a technique's semantics, but a related
+example alone is never sufficient. Evidence support and semantic_match must be decided
+independently from the supplied behavior and evidence. An unknown target platform is not itself
+an incompatibility; reject platform compatibility only when the known platforms conflict.
+
 Use "validated" only when all required checks support retaining the mapping.
 If a deterministic forced_rejection reason is supplied, reject the mapping and explain that reason.
 validator_confidence is the degree of support for retaining the proposed mapping, not confidence

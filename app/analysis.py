@@ -21,7 +21,7 @@ from app.enrichment.ctid_mapper import (
     CTID_PROMPT_VERSION,
     CTIDMappingError,
     FHGenieCTIDCVEMapper,
-    unmapped_ctid_mappings,
+    empty_ctid_mappings,
 )
 from app.enrichment.fh_genie import (
     PROMPT_VERSION,
@@ -276,14 +276,10 @@ class CVEAnalysisService:
                 ),
                 validation_prompt_version=VALIDATION_PROMPT_VERSION,
             )
-        cve_level_mappings = unmapped_ctid_mappings(
-            "No evidence-supported exploit steps were available for CTID CVE-level mapping."
-        )
+        cve_level_mappings = empty_ctid_mappings()
         if steps and (self.ctid_mapper is None or self.mapper is None or self.validator is None):
             warnings.append("FH Genie CTID CVE-level mapper is not configured")
-            cve_level_mappings = unmapped_ctid_mappings(
-                "The CTID CVE-level mapping stage was unavailable."
-            )
+            cve_level_mappings = empty_ctid_mappings()
         elif steps and self.ctid_mapper and self.mapper and self.validator:
             try:
                 cve_level_mappings = await self.ctid_mapper.map(
@@ -291,9 +287,7 @@ class CVEAnalysisService:
                 )
             except (CTIDMappingError, GraphUnavailable) as exc:
                 warnings.append(str(exc))
-                cve_level_mappings = unmapped_ctid_mappings(
-                    "The CTID CVE-level mapping stage failed closed."
-                )
+                cve_level_mappings = empty_ctid_mappings()
         try:
             await self.graph.replace_cve_level_attack_mappings(
                 cve.cve_id,

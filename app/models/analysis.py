@@ -83,6 +83,7 @@ class AttackCandidate(BaseModel):
     description: str
     platforms: list[str] = Field(default_factory=list)
     tactics: dict[str, str] = Field(default_factory=dict)
+    procedure_examples: list[str] = Field(default_factory=list)
 
 
 class AttackMapping(BaseModel):
@@ -113,10 +114,11 @@ class AttackMappingEnvelope(BaseModel):
     mappings: list[AttackMapping]
 
 
-class CVEAttackMappingCategory(StrEnum):
-    EXPLOITATION_TECHNIQUE = "exploitation_technique"
-    PRIMARY_IMPACT = "primary_impact"
-    SECONDARY_IMPACT = "secondary_impact"
+class MappingProcessingStatus(StrEnum):
+    COMPLETED = "completed"
+    RETRIEVAL_FAILED = "retrieval_failed"
+    MAPPING_FAILED = "mapping_failed"
+    VALIDATION_FAILED = "validation_failed"
 
 
 class CVEAttackBehavior(BaseModel):
@@ -124,33 +126,42 @@ class CVEAttackBehavior(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    category: CVEAttackMappingCategory
-    action: str | None = None
+    id: str = Field(pattern=r"^(ET|PI|SI)-[1-9][0-9]*$")
+    action: str = Field(min_length=1)
     prerequisites: list[str] = Field(default_factory=list)
-    outcome: str | None = None
-    evidence: list[StepEvidence] = Field(default_factory=list)
+    outcome: str = Field(min_length=1)
+    enabled_by: list[str] = Field(default_factory=list)
+    evidence: list[StepEvidence] = Field(min_length=1)
     reasoning: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def supported_behavior_is_complete(self) -> "CVEAttackBehavior":
-        populated = self.action is not None
-        if populated != (self.outcome is not None) or populated != bool(self.evidence):
-            raise ValueError("a CTID behavior requires action, outcome, and evidence together")
-        if not populated and self.prerequisites:
-            raise ValueError("an unsupported CTID behavior cannot have prerequisites")
-        return self
 
 
 class CVEAttackBehaviorEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    behaviors: list[CVEAttackBehavior]
+    exploitation_techniques: list[CVEAttackBehavior] = Field(default_factory=list)
+    primary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
+    secondary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def contains_each_category_once(self) -> "CVEAttackBehaviorEnvelope":
-        expected = list(CVEAttackMappingCategory)
-        if [item.category for item in self.behaviors] != expected:
-            raise ValueError("CTID behaviors must contain the three categories in order")
+    def valid_stage_ids_and_links(self) -> "CVEAttackBehaviorEnvelope":
+        groups = (
+            ("ET-", self.exploitation_techniques),
+            ("PI-", self.primary_impacts),
+            ("SI-", self.secondary_impacts),
+        )
+        ids = [item.id for _, items in groups for item in items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("CVE-level behavior IDs must be unique")
+        for prefix, items in groups:
+            if any(not item.id.startswith(prefix) for item in items):
+                raise ValueError(f"stage behavior IDs must start with {prefix}")
+        primary_ids = {item.id for item in self.primary_impacts}
+        for item in self.exploitation_techniques + self.primary_impacts:
+            if item.enabled_by:
+                raise ValueError("only secondary impacts may have enabled_by links")
+        for item in self.secondary_impacts:
+            if not item.enabled_by or not set(item.enabled_by) <= primary_ids:
+                raise ValueError("secondary impacts must reference existing primary impacts")
         return self
 
 
@@ -205,14 +216,16 @@ class CVELevelAttackMapping(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    category: CVEAttackMappingCategory
-    action: str | None = None
+    id: str = Field(pattern=r"^(ET|PI|SI)-[1-9][0-9]*$")
+    action: str = Field(min_length=1)
+    enabled_by: list[str] = Field(default_factory=list)
     mitre_technique_id: str | None = None
     mitre_tactic_id: str | None = None
     reasoning: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[str] = Field(default_factory=list)
     validation: ValidationDetails | None = None
+    processing_status: MappingProcessingStatus = MappingProcessingStatus.COMPLETED
 
     @model_validator(mode="after")
     def mapping_is_consistent(self) -> "CVELevelAttackMapping":
@@ -225,6 +238,32 @@ class CVELevelAttackMapping(BaseModel):
                 raise ValueError("mapped CVE categories must be validated")
         elif self.confidence > 0.33:
             raise ValueError("unmapped CVE categories must have low confidence")
+        return self
+
+
+class CVELevelAttackMappings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    exploitation_techniques: list[CVELevelAttackMapping] = Field(default_factory=list)
+    primary_impacts: list[CVELevelAttackMapping] = Field(default_factory=list)
+    secondary_impacts: list[CVELevelAttackMapping] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def valid_stage_ids_and_links(self) -> "CVELevelAttackMappings":
+        groups = (("ET-", self.exploitation_techniques),
+                  ("PI-", self.primary_impacts), ("SI-", self.secondary_impacts))
+        ids = [item.id for _, items in groups for item in items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("CVE-level mapping IDs must be unique")
+        for prefix, items in groups:
+            if any(not item.id.startswith(prefix) for item in items):
+                raise ValueError(f"stage mapping IDs must start with {prefix}")
+        primary_ids = {item.id for item in self.primary_impacts}
+        if any(item.enabled_by for item in self.exploitation_techniques + self.primary_impacts):
+            raise ValueError("only secondary mappings may have enabled_by links")
+        if any(not item.enabled_by or not set(item.enabled_by) <= primary_ids
+               for item in self.secondary_impacts):
+            raise ValueError("secondary mappings must reference existing primary mappings")
         return self
 
 
@@ -300,6 +339,8 @@ class CVEAnalysis(BaseModel):
     exploit_steps: list[ExploitStep] = Field(default_factory=list)
     attack_mappings: list[AttackMapping] = Field(default_factory=list)
     attack_chain: list[ValidatedAttackStep] = Field(default_factory=list)
-    cve_level_attack_mappings: list[CVELevelAttackMapping] = Field(default_factory=list)
+    cve_level_attack_mappings: CVELevelAttackMappings = Field(
+        default_factory=CVELevelAttackMappings
+    )
     subgraph: EvidenceSubgraph = Field(default_factory=EvidenceSubgraph)
     warnings: list[str] = Field(default_factory=list)

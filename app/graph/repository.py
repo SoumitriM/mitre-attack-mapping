@@ -31,7 +31,7 @@ from app.models import (
     AttackCandidate,
     AttackChainGraph,
     AttackMapping,
-    CVELevelAttackMapping,
+    CVELevelAttackMappings,
     CVERecord,
     EvidenceSubgraph,
     ExploitStep,
@@ -492,6 +492,7 @@ class GraphRepository:
                 name=record["name"],
                 description=record["description"],
                 platforms=record["platforms"],
+                procedure_examples=record.get("procedure_examples") or [],
                 tactics={
                     item["name"]: item["id"]
                     for item in record["tactics"]
@@ -541,7 +542,7 @@ class GraphRepository:
     async def replace_cve_level_attack_mappings(
         self,
         cve_id: str,
-        mappings: list[CVELevelAttackMapping],
+        mappings: CVELevelAttackMappings,
         *,
         model: str,
         prompt_version: str,
@@ -554,7 +555,8 @@ class GraphRepository:
         WITH cve
         UNWIND $mappings AS item
         CREATE (mapping:CVEAttackMapping {
-          id: $cve_id + ':' + item.category,
+          id: $cve_id + ':' + item.id,
+          mapping_id: item.id,
           category: item.category,
           action: item.action,
           reasoning: item.reasoning,
@@ -562,6 +564,8 @@ class GraphRepository:
           tactic_id: item.mitre_tactic_id,
           evidence_ids: item.evidence_ids,
           validation_status: item.validation.status,
+          processing_status: item.processing_status,
+          enabled_by: item.enabled_by,
           model: $model,
           prompt_version: $prompt_version
         })
@@ -583,9 +587,30 @@ class GraphRepository:
                     await session.run(
                         query,
                         cve_id=cve_id,
-                        mappings=[item.model_dump(mode="json") for item in mappings],
+                        mappings=[
+                            {**item.model_dump(mode="json"), "category": category}
+                            for category, items in (
+                                ("exploitation_technique", mappings.exploitation_techniques),
+                                ("primary_impact", mappings.primary_impacts),
+                                ("secondary_impact", mappings.secondary_impacts),
+                            )
+                            for item in items
+                        ],
                         model=model,
                         prompt_version=prompt_version,
+                    )
+                ).consume()
+                await (
+                    await session.run(
+                        """
+                        MATCH (:CVE {id: $cve_id})-[:HAS_CVE_ATTACK_MAPPING]->
+                              (secondary:CVEAttackMapping)
+                        UNWIND secondary.enabled_by AS primary_id
+                        MATCH (:CVE {id: $cve_id})-[:HAS_CVE_ATTACK_MAPPING]->
+                              (primary:CVEAttackMapping {mapping_id: primary_id})
+                        MERGE (secondary)-[:ENABLED_BY]->(primary)
+                        """,
+                        cve_id=cve_id,
                     )
                 ).consume()
         except Exception as exc:
@@ -602,6 +627,7 @@ class GraphRepository:
         WITH technique, collect(DISTINCT {name: tactic.short_name, id: tactic.id}) AS tactics
         RETURN technique.id AS mitre_technique_id, technique.name AS name,
                technique.description AS description, technique.platforms AS platforms,
+               technique.procedure_examples AS procedure_examples,
                tactics ORDER BY technique.id
         """
         try:
@@ -616,6 +642,7 @@ class GraphRepository:
                 name=record["name"],
                 description=record["description"],
                 platforms=record["platforms"],
+                procedure_examples=record["procedure_examples"] or [],
                 tactics={
                     item["name"]: item["id"] for item in record["tactics"] if item["id"] is not None
                 },
