@@ -41,6 +41,7 @@ from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
     AdvisoryResult,
+    AttackCandidate,
     AttackMapping,
     CVEAnalysis,
     DescriptionEvidenceResult,
@@ -188,12 +189,19 @@ class CVEAnalysisService:
                         cve_description=cve.description,
                     )
                     for step in steps
-                )
+                ),
+                return_exceptions=True,
             )
-            candidates = {
-                step.step: candidate_list
-                for step, candidate_list in zip(steps, candidate_lists, strict=True)
-            }
+            candidates: dict[int, list[AttackCandidate]] = {}
+            for step, candidate_list in zip(steps, candidate_lists, strict=True):
+                if isinstance(candidate_list, BaseException):
+                    warnings.append(
+                        f"ATT&CK candidate retrieval failed for step {step.step}: "
+                        f"{type(candidate_list).__name__}"
+                    )
+                    candidates[step.step] = []
+                else:
+                    candidates[step.step] = candidate_list
             try:
                 mappings = await self.mapper.map_steps(cve, steps, candidates)
                 mapping_completed = True

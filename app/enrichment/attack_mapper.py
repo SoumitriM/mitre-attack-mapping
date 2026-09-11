@@ -29,8 +29,8 @@ MAPPING_SYSTEM_PROMPT = """
 You map ONE exploit step to MITRE Enterprise ATT&CK.
 
 For this exploit step, you receive up to the TOP 5 MITRE ATT&CK technique
-candidates retrieved using semantic vector search over the official ATT&CK
-technique corpus.
+candidates produced by hybrid BM25 and semantic retrieval, RRF fusion, and
+closed-set reranking over the official ATT&CK technique corpus.
 
 Your task is NOT to retrieve additional techniques.
 
@@ -473,13 +473,6 @@ class FHGenieAttackMapper:
             {
                 "cve": {
                     "cve_id": cve.cve_id,
-                    "cvss": (
-                        cve.cvss.model_dump(mode="json")
-                        if cve.cvss
-                        else None
-                    ),
-                    "cwe_ids": cve.cwe_ids,
-                    "capec_ids": cve.capec_ids,
                     "platforms": sorted(
                         cve_platforms(cve)
                     ),

@@ -521,6 +521,8 @@ async def rerank_candidates(
 ) -> tuple[list[dict[str, Any]], list[RerankedCandidate]]:
     """Use FH Genie to order only the supplied hybrid candidate set."""
     expected_count = min(limit, len(candidates))
+    if expected_count == 0:
+        return [], []
     payload = {
         "exploit_step": step.model_dump(mode="json"),
         "candidates": [

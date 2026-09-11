@@ -6,6 +6,7 @@ from app.enrichment.fh_genie import AsyncCompatibleClient
 from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository
 from app.models import (
+    AttackCandidate,
     CVEAttackBehavior,
     CVEAttackBehaviorEnvelope,
     CVEAttackMappingCategory,
@@ -114,12 +115,17 @@ class FHGenieCTIDCVEMapper:
             {platform for product in cve.affected_products for platform in product.platforms}
         )
         candidate_lists = await asyncio.gather(
-            *(graph.attack_candidates(item, platforms, cve_id=cve.cve_id) for item in synthetic)
+            *(graph.attack_candidates(item, platforms, cve_id=cve.cve_id) for item in synthetic),
+            return_exceptions=True,
         )
-        candidates = {
-            item.step: candidate_list
-            for item, candidate_list in zip(synthetic, candidate_lists, strict=True)
-        }
+        candidates: dict[int, list[AttackCandidate]] = {}
+        retrieval_failures: dict[int, str] = {}
+        for item, candidate_list in zip(synthetic, candidate_lists, strict=True):
+            if isinstance(candidate_list, BaseException):
+                candidates[item.step] = []
+                retrieval_failures[item.step] = type(candidate_list).__name__
+            else:
+                candidates[item.step] = candidate_list
         proposals = await mapper.map_steps(cve, synthetic, candidates) if synthetic else []
         official = await graph.official_attack_context(
             [item.mitre_technique_id for item in proposals if item.mitre_technique_id]
@@ -139,6 +145,7 @@ class FHGenieCTIDCVEMapper:
                 evidence_id(str(item.source_url), item.supporting_text)
                 for item in behavior.evidence
             ]
+            retrieval_failure = retrieval_failures.get(number)
             results.append(
                 CVELevelAttackMapping(
                     category=behavior.category,
@@ -148,7 +155,12 @@ class FHGenieCTIDCVEMapper:
                     reasoning=(
                         checked.validation.reasoning
                         if checked is not None
-                        else behavior.reasoning
+                        else (
+                            f"ATT&CK candidate retrieval failed for this category: "
+                            f"{retrieval_failure}"
+                            if retrieval_failure
+                            else behavior.reasoning
+                        )
                     ),
                     confidence=(
                         checked.validation.validator_confidence

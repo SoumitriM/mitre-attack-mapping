@@ -317,6 +317,18 @@ async def test_empty_reranker_response_writes_structured_diagnostic(
     assert diagnostic["raw_reasoning_response"] == "reasoning only"
 
 
+@pytest.mark.asyncio
+async def test_empty_candidate_set_bypasses_reranker_model() -> None:
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock()
+
+    ranked, metadata = await rerank_candidates(client, "fh-genie", step(), [])
+
+    assert ranked == []
+    assert metadata == []
+    client.chat.completions.create.assert_not_awaited()
+
+
 def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
     import app.enrichment.candidate_retrieval as retrieval
 
