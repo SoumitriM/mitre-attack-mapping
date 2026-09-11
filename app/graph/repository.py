@@ -427,6 +427,7 @@ class GraphRepository:
                     combined_candidates,
                     min(limit, RERANK_LIMIT),
                 )
+                rerank_error = None
                 break
             except Exception as exc:
                 rerank_error = exc
@@ -442,9 +443,19 @@ class GraphRepository:
                     },
                 )
         else:
-            raise GraphUnavailable(
-                f"FH Genie ATT&CK reranking failed for step {step.step}: {rerank_error}"
-            ) from rerank_error
+            ranked = combined_candidates[: min(limit, RERANK_LIMIT)]
+            reranked_metadata = []
+            logger.warning(
+                "FH Genie ATT&CK reranking exhausted retries; using hybrid RRF order",
+                extra={
+                    "cve_id": cve_id,
+                    "step": step.step,
+                    "action": step.action,
+                    "fallback_candidate_count": len(ranked),
+                    "error_type": type(rerank_error).__name__,
+                    "error": str(rerank_error),
+                },
+            )
 
         log_file = save_retrieval_log(
             cve_id=cve_id,
@@ -455,6 +466,8 @@ class GraphRepository:
             vector_candidates=vector_candidates,
             combined_candidates=combined_candidates,
             reranked=reranked_metadata,
+            rerank_status=("fallback_rrf" if rerank_error is not None else "completed"),
+            rerank_error=str(rerank_error) if rerank_error is not None else None,
         )
 
         logger.info(

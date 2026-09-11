@@ -282,6 +282,41 @@ async def test_reranker_rejects_invented_candidate() -> None:
         await rerank_candidates(client, "fh-genie", step(), candidates)
 
 
+@pytest.mark.asyncio
+async def test_empty_reranker_response_writes_structured_diagnostic(
+    tmp_path, monkeypatch
+) -> None:
+    import app.enrichment.candidate_retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "RERANK_RESPONSE_LOG_DIR", tmp_path)
+    candidates = [{**record(i), "vector_score": 0.5} for i in range(5)]
+    empty = MagicMock(
+        id="response-1",
+        model="provider-model",
+        choices=[
+            MagicMock(
+                finish_reason="length",
+                message=MagicMock(content="", reasoning_content="reasoning only"),
+            )
+        ],
+    )
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=empty)
+
+    with pytest.raises(ValueError, match="Empty FH Genie reranker response"):
+        await rerank_candidates(client, "requested-model", step(), candidates)
+
+    diagnostic = json.loads(next(tmp_path.glob("step_5_rerank_empty_*.json")).read_text())
+    assert diagnostic["provider"] == "FH Genie"
+    assert diagnostic["requested_model"] == "requested-model"
+    assert diagnostic["response_model"] == "provider-model"
+    assert diagnostic["number_of_input_candidates"] == 5
+    assert diagnostic["number_of_valid_reranked_candidates"] == 0
+    assert diagnostic["parse_error"] == "response message content was empty"
+    assert diagnostic["raw_model_response"] == ""
+    assert diagnostic["raw_reasoning_response"] == "reasoning only"
+
+
 def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
     import app.enrichment.candidate_retrieval as retrieval
 

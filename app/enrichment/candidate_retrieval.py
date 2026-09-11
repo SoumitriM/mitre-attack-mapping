@@ -467,17 +467,48 @@ def _extract_json(content: str) -> str:
     return json.dumps(value)
 
 
-def _save_invalid_rerank_response(step: ExploitStep, content: str, error: Exception) -> Path:
+def _save_rerank_diagnostic(
+    step: ExploitStep,
+    *,
+    requested_model: str,
+    response: Any,
+    content: str | None,
+    candidates: list[dict[str, Any]],
+    parsed_output: dict[str, Any] | None,
+    valid_candidate_count: int,
+    parse_error: str | None,
+    status: str,
+) -> Path:
     RERANK_RESPONSE_LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-    path = RERANK_RESPONSE_LOG_DIR / f"step_{step.step}_rerank_invalid_{timestamp}.txt"
+    path = RERANK_RESPONSE_LOG_DIR / f"step_{step.step}_rerank_{status}_{timestamp}.json"
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    message = getattr(choice, "message", None)
+
+    def scalar(value: Any) -> str | int | float | bool | None:
+        return value if isinstance(value, (str, int, float, bool)) or value is None else None
+
+    diagnostic = {
+        "timestamp": timestamp,
+        "step": step.step,
+        "action": step.action,
+        "provider": "FH Genie",
+        "requested_model": requested_model,
+        "response_model": scalar(getattr(response, "model", None)),
+        "response_id": scalar(getattr(response, "id", None)),
+        "finish_reason": scalar(getattr(choice, "finish_reason", None)),
+        "raw_model_response": content,
+        "raw_reasoning_response": scalar(getattr(message, "reasoning_content", None)),
+        "parsed_reranker_output": parsed_output,
+        "number_of_input_candidates": len(candidates),
+        "number_of_valid_reranked_candidates": valid_candidate_count,
+        "parse_error": parse_error,
+        "status": status,
+    }
     try:
-        path.write_text(
-            f"Step: {step.step}\nAction: {step.action}\nError: {error}\n\n{content}",
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps(diagnostic, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError:
-        logger.exception("Failed to write invalid reranker response log")
+        logger.exception("Failed to write reranker diagnostic log")
     return path
 
 
@@ -523,23 +554,89 @@ async def rerank_candidates(
     )
     content = response.choices[0].message.content
     if not content:
-        raise ValueError("Empty FH Genie reranker response")
+        log_file = _save_rerank_diagnostic(
+            step,
+            requested_model=model,
+            response=response,
+            content=content,
+            candidates=candidates,
+            parsed_output=None,
+            valid_candidate_count=0,
+            parse_error="response message content was empty",
+            status="empty",
+        )
+        raise ValueError(f"Empty FH Genie reranker response; diagnostic: {log_file}")
+    parsed_output: dict[str, Any] | None = None
     try:
-        envelope = RerankEnvelope.model_validate_json(_extract_json(content))
+        extracted = _extract_json(content)
+        value = json.loads(extracted)
+        parsed_output = value if isinstance(value, dict) else None
+        envelope = RerankEnvelope.model_validate(value)
     except (ValueError, ValidationError) as exc:
-        log_file = _save_invalid_rerank_response(step, content, exc)
+        log_file = _save_rerank_diagnostic(
+            step,
+            requested_model=model,
+            response=response,
+            content=content,
+            candidates=candidates,
+            parsed_output=parsed_output,
+            valid_candidate_count=0,
+            parse_error=str(exc),
+            status="invalid_structure",
+        )
         raise ValueError(
             f"Invalid FH Genie reranker response: {exc}; raw response: {log_file}"
         ) from exc
     supplied = {item["mitre_technique_id"]: item for item in candidates}
     returned_ids = [item.mitre_technique_id for item in envelope.candidates]
     if len(returned_ids) != expected_count or len(set(returned_ids)) != expected_count:
+        valid_count = len(set(returned_ids) & supplied.keys())
+        log_file = _save_rerank_diagnostic(
+            step,
+            requested_model=model,
+            response=response,
+            content=content,
+            candidates=candidates,
+            parsed_output=parsed_output,
+            valid_candidate_count=valid_count,
+            parse_error=(
+                f"expected {expected_count} unique candidates, "
+                f"received {len(set(returned_ids))}"
+            ),
+            status="invalid_candidate_count",
+        )
         raise ValueError(
-            f"FH Genie reranker must return exactly {expected_count} unique candidates"
+            f"FH Genie reranker must return exactly {expected_count} unique candidates; "
+            f"diagnostic: {log_file}"
         )
     unknown = set(returned_ids) - supplied.keys()
     if unknown:
-        raise ValueError(f"FH Genie reranker returned unsupplied candidate IDs: {sorted(unknown)}")
+        log_file = _save_rerank_diagnostic(
+            step,
+            requested_model=model,
+            response=response,
+            content=content,
+            candidates=candidates,
+            parsed_output=parsed_output,
+            valid_candidate_count=len(set(returned_ids) & supplied.keys()),
+            parse_error=f"unsupplied candidate IDs: {sorted(unknown)}",
+            status="invalid_candidate_ids",
+        )
+        raise ValueError(
+            f"FH Genie reranker returned unsupplied candidate IDs: {sorted(unknown)}; "
+            f"diagnostic: {log_file}"
+        )
+    _save_rerank_diagnostic(
+        step,
+        requested_model=model,
+        response=response,
+        content=content,
+        candidates=candidates,
+        parsed_output=parsed_output,
+        valid_candidate_count=len(returned_ids),
+        parse_error=None,
+        status="completed",
+    )
     return [supplied[item_id] for item_id in returned_ids], envelope.candidates
 
 
@@ -553,6 +650,8 @@ def save_retrieval_log(
     vector_candidates: list[dict[str, Any]],
     combined_candidates: list[dict[str, Any]],
     reranked: list[RerankedCandidate],
+    rerank_status: str = "completed",
+    rerank_error: str | None = None,
 ) -> Path:
     RETRIEVAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
@@ -593,6 +692,8 @@ def save_retrieval_log(
             for rank, item in enumerate(combined_candidates, start=1)
         ],
         "overlap_count": len(bm25_candidates) + len(vector_candidates) - len(combined_candidates),
+        "rerank_status": rerank_status,
+        "rerank_error": rerank_error,
         "reranked_candidates": [
             {"rank": rank, "id": item.mitre_technique_id, "rerank_score": item.rerank_score}
             for rank, item in enumerate(reranked, start=1)

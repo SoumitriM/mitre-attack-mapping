@@ -273,6 +273,62 @@ async def test_attack_candidates_retry_invalid_reranker_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attack_candidates_fall_back_to_hybrid_order_after_empty_reranks() -> None:
+    session = MagicMock()
+    session.run = AsyncMock(
+        return_value=AsyncRecords(
+            [
+                {
+                    "mitre_technique_id": "T1105",
+                    "name": "Ingress Tool Transfer",
+                    "description": "Transfer files from an external system.",
+                    "platforms": ["Windows"],
+                    "procedure_examples": [],
+                    "revoked": False,
+                    "tactics": [{"name": "command-and-control", "id": "TA0011"}],
+                }
+            ]
+        )
+    )
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+    client = MagicMock()
+    client.embeddings.create = AsyncMock(
+        side_effect=[
+            MagicMock(data=[MagicMock(embedding=[1.0, 0.0])]),
+            MagicMock(data=[MagicMock(embedding=[1.0, 0.0])]),
+        ]
+    )
+    normalized = MagicMock(
+        choices=[MagicMock(message=MagicMock(content='{"normalized_query":"Transfer a file."}'))]
+    )
+    empty = MagicMock(choices=[MagicMock(message=MagicMock(content=""))])
+    client.chat.completions.create = AsyncMock(side_effect=[normalized, empty, empty])
+    item = ExploitStep.model_validate(
+        {
+            "step": 2,
+            "action": "Download a malicious archive",
+            "outcome": "The archive reaches the target",
+            "evidence": [
+                {
+                    "source_url": "https://research.example/advisory",
+                    "supporting_text": "The target downloads the malicious archive.",
+                }
+            ],
+        }
+    )
+
+    candidates = await GraphRepository(driver, client, "embedding-model").attack_candidates(
+        item, ["Windows"]
+    )
+
+    assert [item.mitre_technique_id for item in candidates] == ["T1105"]
+    assert client.chat.completions.create.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_attack_candidates_fall_back_to_raw_query_when_normalization_is_empty() -> None:
     session = MagicMock()
     session.run = AsyncMock(
