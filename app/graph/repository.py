@@ -968,7 +968,8 @@ class GraphRepository:
         WHERE all(rel IN relationships(path) WHERE type(rel) IN
           ['HAS_WEAKNESS','RELATED_TO_CAPEC','HAS_ATTACK_PATTERN','AFFECTS',
            'RUNS_ON','HAS_COMPONENT','REFERENCES','CONTAINS','HAS_EXPLOIT_STEP',
-           'SUPPORTED_BY','NEXT','MAPS_TO','HAS_TACTIC'])
+           'SUPPORTED_BY','NEXT','MAPS_TO','HAS_TACTIC',
+           'HAS_CVE_ATTACK_MAPPING','ENABLED_BY'])
         UNWIND nodes(path) AS n
         WITH collect(DISTINCT n) AS nodes, collect(DISTINCT relationships(path)) AS paths
         UNWIND paths AS rels UNWIND rels AS rel
@@ -979,11 +980,25 @@ class GraphRepository:
                                                 ELSE coalesce(rel.authoritative, true)
                                            END}) AS edges
         """
-        try:
-            async with self._driver.session() as session:
-                record = await (await session.run(query, cve_id=cve_id)).single()
-        except Exception as exc:
-            raise GraphUnavailable("Neo4j subgraph query failed") from exc
+        record = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                async with self._driver.session() as session:
+                    record = await (await session.run(query, cve_id=cve_id)).single()
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Neo4j subgraph query attempt failed",
+                    exc_info=True,
+                    extra={"cve_id": cve_id, "attempt": attempt + 1},
+                )
+        if last_error is not None:
+            raise GraphUnavailable(
+                f"Neo4j subgraph query failed after 2 attempts: {last_error}"
+            ) from last_error
         if record is None:
             return EvidenceSubgraph()
         nodes = []

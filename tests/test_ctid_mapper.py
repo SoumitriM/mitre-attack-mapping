@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.enrichment.attack_mapper import evidence_id
-from app.enrichment.ctid_mapper import CTIDMappingError, FHGenieCTIDCVEMapper
+from app.enrichment.ctid_mapper import FHGenieCTIDCVEMapper
 from app.models import (
     AffectedProduct,
     AttackCandidate,
@@ -102,19 +102,63 @@ async def test_identifies_all_categories_and_preserves_explicit_nulls() -> None:
     payload = api.chat.completions.create.await_args.kwargs["messages"][1]["content"]
     assert "CWE-494" not in payload
     assert "CAPEC-187" not in payload
+    assert "EVIDENCE_CATALOG" in payload
+    assert api.chat.completions.create.await_args.kwargs["response_format"] == {
+        "type": "json_object"
+    }
+    assert api.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 8192
+    prompt = api.chat.completions.create.await_args.kwargs["messages"][0]["content"]
+    assert "Evidence entries MUST be objects, never strings" in prompt
+    assert '"source_url":"https://...","supporting_text":"exact supplied text"' in prompt
 
 
 @pytest.mark.asyncio
-async def test_rejects_evidence_not_attached_to_existing_steps() -> None:
+async def test_rejects_unprovenanced_evidence_without_erasing_valid_behaviors(
+    tmp_path, monkeypatch
+) -> None:
+    import app.enrichment.ctid_mapper as ctid
+
+    monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
+    valid = behavior_response("The client downloads the malicious archive.")
+    payload = __import__("json").loads(valid)
+    invalid = dict(payload["exploitation_techniques"][0])
+    invalid["id"] = "ET-2"
+    invalid["evidence"] = ["The client downloads the malicious archive."]
+    payload["exploitation_techniques"].append(invalid)
     api = MagicMock()
     api.chat.completions.create = AsyncMock(
-        return_value=response(behavior_response("Evidence invented by the model."))
+        return_value=response(__import__("json").dumps(payload))
     )
 
-    with pytest.raises(CTIDMappingError, match="evidence"):
+    behaviors = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
+
+    assert [item.id for item in behaviors.exploitation_techniques] == ["ET-1"]
+    diagnostics = [__import__("json").loads(path.read_text()) for path in tmp_path.glob("*.json")]
+    assert all(item["status"] == "partial_validation_failure" for item in diagnostics)
+    assert "Input should be a valid dictionary" in diagnostics[0]["validation_errors"][0]["error"]
+    assert all(item["legitimate_empty_result"] is False for item in diagnostics)
+    assert api.chat.completions.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_behavior_envelope_is_logged_and_not_treated_as_empty(
+    tmp_path, monkeypatch
+) -> None:
+    import app.enrichment.ctid_mapper as ctid
+
+    monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response('{"exploitation_techniques":'))
+
+    with pytest.raises(ctid.CTIDMappingError, match="invalid CTID behavior JSON"):
         await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
 
-    assert api.chat.completions.create.await_count == 2
+    diagnostics = list(tmp_path.glob("*.json"))
+    assert len(diagnostics) == 2
+    logged = __import__("json").loads(diagnostics[0].read_text())
+    assert logged["status"] == "validation_failed"
+    assert logged["legitimate_empty_result"] is False
+    assert "invalid CTID behavior JSON" in logged["validation_errors"][0]["error"]
 
 
 @pytest.mark.asyncio

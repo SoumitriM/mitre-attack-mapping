@@ -117,7 +117,26 @@ async def test_subgraph_does_not_traverse_back_into_cves_sharing_a_weakness() ->
     query = session.run.await_args.args[0]
     assert "-[*0..3]->(node)" in query
     assert "-[*0..3]-(node)" not in query
+    assert "HAS_CVE_ATTACK_MAPPING" in query
+    assert "ENABLED_BY" in query
     assert session.run.await_args.kwargs == {"cve_id": "CVE-2026-63077"}
+
+
+@pytest.mark.asyncio
+async def test_subgraph_retries_one_transient_query_failure() -> None:
+    result = MagicMock()
+    result.single = AsyncMock(return_value=None)
+    session = MagicMock()
+    session.run = AsyncMock(side_effect=[RuntimeError("connection reset"), result])
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    driver = MagicMock()
+    driver.session.return_value = context
+
+    subgraph = await GraphRepository(driver).subgraph("CVE-2026-63077")
+
+    assert subgraph.nodes == []
+    assert session.run.await_count == 2
 
 
 @pytest.mark.asyncio
