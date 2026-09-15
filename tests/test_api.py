@@ -32,7 +32,14 @@ def test_serves_dependency_free_visualization() -> None:
 
 def test_compact_analysis_view_contains_only_mapping_views() -> None:
     result = CVEAnalysis.model_validate({
-        "cve": {"cve_id": "CVE-2026-22306"},
+        "cve": {"cve_id": "CVE-2026-22306", "description": "Test description"},
+        "exploit_steps": [{
+            "step": 1, "action": "Execute payload", "outcome": "Code execution",
+            "evidence": [{
+                "source_url": "https://research.example/advisory",
+                "supporting_text": "The payload executes.",
+            }],
+        }],
         "attack_chain": [{
             "step": 1,
             "action": "Execute payload",
@@ -81,7 +88,12 @@ def test_compact_analysis_view_contains_only_mapping_views() -> None:
 
     compact = compact_analysis_view(result).model_dump(mode="json")
 
-    assert set(compact) == {"attack_chain", "ctid_map"}
+    assert set(compact) == {
+        "cve_id", "description", "exploit_steps", "attack_chain", "ctid_map"
+    }
+    assert compact["cve_id"] == "CVE-2026-22306"
+    assert compact["description"] == "Test description"
+    assert compact["exploit_steps"] == [{"step": 1, "action": "Execute payload"}]
     assert compact["attack_chain"] == [{
         "step": 1, "action": "Execute payload", "technique_id": None,
         "tactic_id": None, "status": "unmapped",

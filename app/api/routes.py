@@ -37,6 +37,11 @@ class CompactAttackStep(BaseModel):
     status: ValidationStatus
 
 
+class CompactExploitStep(BaseModel):
+    step: int
+    action: str
+
+
 class CompactCTIDTechnique(BaseModel):
     id: str
     action: str
@@ -56,6 +61,9 @@ class CompactCTIDMap(BaseModel):
 
 
 class CompactCVEAnalysis(BaseModel):
+    cve_id: str
+    description: str | None
+    exploit_steps: list[CompactExploitStep]
     attack_chain: list[CompactAttackStep]
     ctid_map: CompactCTIDMap
 
@@ -77,6 +85,12 @@ def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
 
     mappings = result.cve_level_attack_mappings
     return CompactCVEAnalysis(
+        cve_id=result.cve.cve_id,
+        description=result.cve.description,
+        exploit_steps=[
+            CompactExploitStep(step=item.step, action=item.action)
+            for item in result.exploit_steps
+        ],
         attack_chain=[
             CompactAttackStep(
                 step=item.step,
