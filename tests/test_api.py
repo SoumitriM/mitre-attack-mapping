@@ -1,6 +1,8 @@
+from inspect import signature
+
 from fastapi.testclient import TestClient
 
-from app.api.routes import compact_analysis_view
+from app.api.routes import analyze, compact_analysis_view
 from app.main import app
 from app.models import CVEAnalysis
 
@@ -20,6 +22,10 @@ def test_exposes_analysis_endpoint_and_retires_attack_path() -> None:
     analysis_schema = schema["components"]["schemas"]["CVEAnalysis"]
     assert "attack_mappings" in analysis_schema["properties"]
     assert "attack_chain" in analysis_schema["properties"]
+
+
+def test_compact_response_is_the_default_and_full_response_can_be_requested() -> None:
+    assert signature(analyze).parameters["compact"].default is True
 
 
 def test_serves_dependency_free_visualization() -> None:

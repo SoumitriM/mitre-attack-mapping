@@ -141,7 +141,7 @@ async def attack_chain_graph(cve_id: str) -> AttackChainGraph:
 
 @router.post("/cve-analysis", response_model=CVEAnalysis | CompactCVEAnalysis)
 async def analyze(
-    request: AnalyzeRequest, compact: bool = False
+    request: AnalyzeRequest, compact: bool = True
 ) -> CVEAnalysis | CompactCVEAnalysis:
     settings = get_settings()
     if settings.neo4j_password is None:
