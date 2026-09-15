@@ -14,13 +14,91 @@ from app.enrichment.fh_genie import FHGenieEvidenceAgent
 from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVENotAvailable, InvalidCVEID, normalize_cve_id
-from app.models import AttackChainGraph, CVEAnalysis
+from app.models import (
+    AttackChainGraph,
+    CVEAnalysis,
+    CVELevelAttackMapping,
+    MappingProcessingStatus,
+    ValidationStatus,
+)
 
 router = APIRouter(prefix="/api", tags=["cve"])
 
 
 class AnalyzeRequest(BaseModel):
     cve_id: str = Field(examples=["CVE-2026-22306"])
+
+
+class CompactAttackStep(BaseModel):
+    step: int
+    action: str
+    technique_id: str | None
+    tactic_id: str | None
+    status: ValidationStatus
+
+
+class CompactCTIDTechnique(BaseModel):
+    id: str
+    action: str
+    technique_id: str | None
+    tactic_id: str | None
+    status: MappingProcessingStatus
+
+
+class CompactCTIDLinkedBehavior(CompactCTIDTechnique):
+    enabled_by: list[str]
+
+
+class CompactCTIDMap(BaseModel):
+    exploitation_techniques: list[CompactCTIDTechnique]
+    primary_impacts: list[CompactCTIDLinkedBehavior]
+    secondary_impacts: list[CompactCTIDLinkedBehavior]
+
+
+class CompactCVEAnalysis(BaseModel):
+    attack_chain: list[CompactAttackStep]
+    ctid_map: CompactCTIDMap
+
+
+def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
+    def ctid_item(
+        item: CVELevelAttackMapping, *, linked: bool
+    ) -> CompactCTIDTechnique:
+        values = {
+            "id": item.id,
+            "action": item.action,
+            "technique_id": item.mitre_technique_id,
+            "tactic_id": item.mitre_tactic_id,
+            "status": item.processing_status,
+        }
+        if linked:
+            return CompactCTIDLinkedBehavior(**values, enabled_by=item.enabled_by)
+        return CompactCTIDTechnique(**values)
+
+    mappings = result.cve_level_attack_mappings
+    return CompactCVEAnalysis(
+        attack_chain=[
+            CompactAttackStep(
+                step=item.step,
+                action=item.action,
+                technique_id=item.proposed_technique_id,
+                tactic_id=item.mitre_tactic_id,
+                status=item.validation.status,
+            )
+            for item in result.attack_chain
+        ],
+        ctid_map=CompactCTIDMap(
+            exploitation_techniques=[
+                ctid_item(item, linked=False) for item in mappings.exploitation_techniques
+            ],
+            primary_impacts=[
+                ctid_item(item, linked=True) for item in mappings.primary_impacts
+            ],
+            secondary_impacts=[
+                ctid_item(item, linked=True) for item in mappings.secondary_impacts
+            ],
+        ),
+    )
 
 
 @router.get("/cve-analysis/{cve_id}/graph", response_model=AttackChainGraph)
@@ -47,8 +125,10 @@ async def attack_chain_graph(cve_id: str) -> AttackChainGraph:
         await driver.close()
 
 
-@router.post("/cve-analysis", response_model=CVEAnalysis)
-async def analyze(request: AnalyzeRequest) -> CVEAnalysis:
+@router.post("/cve-analysis", response_model=CVEAnalysis | CompactCVEAnalysis)
+async def analyze(
+    request: AnalyzeRequest, compact: bool = False
+) -> CVEAnalysis | CompactCVEAnalysis:
     settings = get_settings()
     if settings.neo4j_password is None:
         raise HTTPException(status_code=503, detail="Neo4j is not configured")
@@ -76,9 +156,10 @@ async def analyze(request: AnalyzeRequest) -> CVEAnalysis:
         )
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            return await CVEAnalysisService(
+            result = await CVEAnalysisService(
                 settings, graph, client, agent, mapper, validator, ctid_mapper
             ).analyze(request.cve_id)
+            return compact_analysis_view(result) if compact else result
     except InvalidCVEID as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CVENotAvailable as exc:
