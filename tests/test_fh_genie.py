@@ -42,6 +42,24 @@ def settings() -> Settings:
     )
 
 
+def test_openrouter_key_selects_opus_as_default_provider() -> None:
+    api = MagicMock()
+    configured = Settings(_env_file=None, openrouter_key="openrouter-secret")
+
+    agent = FHGenieEvidenceAgent(configured, api)
+
+    assert configured.inference_model == "anthropic/claude-opus-4.6"
+    assert agent.model == "anthropic/claude-opus-4.6"
+    assert agent.client is api
+    assert agent.embedding_client is api
+
+
+def test_fh_genie_remains_fallback_without_openrouter_key() -> None:
+    configured = settings()
+
+    assert configured.inference_model == "model"
+
+
 def response(content: str) -> SimpleNamespace:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 

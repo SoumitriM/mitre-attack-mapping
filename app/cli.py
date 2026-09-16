@@ -46,10 +46,10 @@ async def _analyze(cve_id: str) -> dict[str, object]:
             ctid_mapper = None
         graph = GraphRepository(
             driver,
-            cast(EmbeddingClient, agent.client) if agent else None,
+            cast(EmbeddingClient, agent.embedding_client) if agent else None,
             settings.fh_genie_embedding_model if agent else None,
             agent.client if agent else None,
-            settings.fh_genie_model if agent else None,
+            agent.model if agent else None,
         )
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:

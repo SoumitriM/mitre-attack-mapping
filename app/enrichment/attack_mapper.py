@@ -338,12 +338,12 @@ class FHGenieAttackMapper:
         settings: Settings,
         client: AsyncCompatibleClient,
     ) -> None:
-        if not settings.fh_genie_model:
+        if not settings.inference_model:
             raise ValueError(
                 "FH Genie model is not configured"
             )
 
-        self.model = settings.fh_genie_model
+        self.model = settings.inference_model
         self.min_confidence = settings.mapping_min_confidence
         self._client = client
 

@@ -24,9 +24,16 @@ class Settings(BaseSettings):
     fh_genie_base_url: str | None = None
     fh_genie_model: str | None = None
     fh_genie_embedding_model: str = "BAAI/bge-m3"
+    openrouter_key: SecretStr | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "anthropic/claude-opus-4.6"
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: SecretStr | None = None
+
+    @property
+    def inference_model(self) -> str | None:
+        return self.openrouter_model if self.openrouter_key else self.fh_genie_model
 
     @field_validator("advisory_allowed_domains", mode="before")
     @classmethod

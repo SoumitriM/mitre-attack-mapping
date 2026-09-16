@@ -264,21 +264,36 @@ class FHGenieEvidenceAgent:
         settings: Settings,
         client: AsyncCompatibleClient | None = None,
     ) -> None:
-        if (
-            not settings.fh_genie_key
-            or not settings.fh_genie_base_url
-            or not settings.fh_genie_model
-        ):
-            raise ValueError("FH Genie configuration is incomplete")
-        self.model = settings.fh_genie_model
-        self._client = client or AsyncOpenAI(
-            api_key=settings.fh_genie_key.get_secret_value(),
-            base_url=settings.fh_genie_base_url,
+        if settings.openrouter_key:
+            self.model = settings.openrouter_model
+            self._client = client or AsyncOpenAI(
+                api_key=settings.openrouter_key.get_secret_value(),
+                base_url=settings.openrouter_base_url,
+            )
+        elif settings.fh_genie_key and settings.fh_genie_base_url and settings.fh_genie_model:
+            self.model = settings.fh_genie_model
+            self._client = client or AsyncOpenAI(
+                api_key=settings.fh_genie_key.get_secret_value(),
+                base_url=settings.fh_genie_base_url,
+            )
+        else:
+            raise ValueError("No model provider is configured")
+        self._embedding_client = (
+            AsyncOpenAI(
+                api_key=settings.fh_genie_key.get_secret_value(),
+                base_url=settings.fh_genie_base_url,
+            )
+            if settings.fh_genie_key and settings.fh_genie_base_url
+            else self._client
         )
 
     @property
     def client(self) -> AsyncCompatibleClient:
         return cast(AsyncCompatibleClient, self._client)
+
+    @property
+    def embedding_client(self) -> AsyncCompatibleClient:
+        return cast(AsyncCompatibleClient, self._embedding_client)
 
     async def extract(
         self,
