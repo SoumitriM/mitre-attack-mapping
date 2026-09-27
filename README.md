@@ -77,10 +77,11 @@ curl -X POST http://127.0.0.1:8000/api/cve-analysis \
 ```
 
 The default response is a JSON array containing one result per requested CVE, in the same order as
-`cve_ids`. Each result contains only `cve_id` and `attack_chain`. Every chain step has the required
-`step`, `action`, `tactic_id`, `technique_id`, `confidence`, and `mapped` fields; IDs are null when
-`mapped` is false. The request must contain at least one CVE ID. Use `?compact=false` only when the
-complete analysis, including source advisories and internal evidence, is required.
+`cve_ids`. Each result contains `cve_id`, `attack_chain`, and `ctid_map`. Every chain step has the
+required `step`, `action`, `tactic_id`, `technique_id`, `confidence`, and `mapped` fields; IDs are
+null when `mapped` is false. `ctid_map` contains `exploitation_techniques`, `primary_impacts`, and
+`secondary_impacts`. The request must contain at least one CVE ID. Use `?compact=false` only when
+the complete in-memory analysis, including source advisories and evidence, is required.
 
 Each entry in `attack_mappings` contains exactly the step/action, nullable technique and
 tactic IDs, evidence-grounded reasoning, confidence, and supporting evidence IDs. A step
@@ -121,11 +122,10 @@ bulk-downloaded. Tagged advisory references are prioritized,
 and untagged references require a configured allowlisted domain. Advisory requests reject private
 networks, revalidate redirects, and enforce content and size limits.
 
-Normalized CVE records are cached on their Neo4j `CVE` node with the structured-source retrieval
-timestamp and full field provenance. `CACHE_TTL_SECONDS` controls freshness (default one hour);
-fresh records avoid source requests, stale records are fetched again, and `0` disables the cache.
-Refreshing a CVE replaces its scoped evidence relationships so outdated source context is not
-retained.
+Neo4j stores only the pinned Enterprise ATT&CK matrix. CVE records, advisory content, evidence,
+exploit steps, mappings, validation results, and CTID results exist only in request memory and are
+released after the response is produced. Every request fetches current CVE source data; no
+per-CVE record or analysis is retained in the database.
 
 FH Genie receives the normalized authoritative CVE description and fetched advisory text as
 untrusted evidence. Each returned exploit step must cite an exact excerpt from a supplied source.

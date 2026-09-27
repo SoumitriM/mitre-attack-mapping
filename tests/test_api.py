@@ -17,7 +17,7 @@ def test_exposes_analysis_endpoint_and_retires_attack_path() -> None:
     schema = TestClient(app).get("/openapi.json").json()
     paths = schema["paths"]
     assert "/api/cve-analysis" in paths
-    assert "/api/cve-analysis/{cve_id}/graph" in paths
+    assert "/api/cve-analysis/{cve_id}/graph" not in paths
     assert "/api/attack-path" not in paths
     analysis_schema = schema["components"]["schemas"]["CVEAnalysis"]
     assert "attack_mappings" in analysis_schema["properties"]
@@ -40,12 +40,10 @@ def test_analysis_request_rejects_an_empty_array() -> None:
     assert response.status_code == 422
 
 
-def test_serves_dependency_free_visualization() -> None:
+def test_does_not_expose_a_persisted_cve_visualization() -> None:
     response = TestClient(app).get("/visualization")
 
-    assert response.status_code == 200
-    assert "Validated ATT&amp;CK Chain" in response.text
-    assert "vis-network" not in response.text
+    assert response.status_code == 404
 
 
 def test_compact_analysis_view_contains_only_mapping_views() -> None:
@@ -132,7 +130,7 @@ def test_compact_analysis_view_contains_only_mapping_views() -> None:
 
     compact = compact_analysis_view(result).model_dump(mode="json")
 
-    assert set(compact) == {"cve_id", "attack_chain"}
+    assert set(compact) == {"cve_id", "attack_chain", "ctid_map"}
     assert compact["cve_id"] == "CVE-2026-22306"
     assert compact["attack_chain"] == [
         {
@@ -144,5 +142,7 @@ def test_compact_analysis_view_contains_only_mapping_views() -> None:
             "mapped": False,
         }
     ]
+    assert compact["ctid_map"]["exploitation_techniques"][0]["technique_id"] == "T1203"
+    assert compact["ctid_map"]["primary_impacts"][0]["enabled_by"] == ["ET-1"]
     assert set(ctid_only_view(result).model_dump(mode="json")) == {"ctid_map"}
     assert "warnings" not in compact

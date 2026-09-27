@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import logging
 
 import httpx
@@ -12,22 +11,13 @@ from app.advisory.client import (
     select_references,
 )
 from app.config import Settings
-from app.enrichment.attack_mapper import (
-    MAPPING_PROMPT_VERSION,
-    FHGenieAttackMapper,
-    MappingResponseError,
-)
+from app.enrichment.attack_mapper import FHGenieAttackMapper, MappingResponseError
 from app.enrichment.ctid_mapper import (
-    CTID_DESCRIPTION_PROMPT_VERSION,
-    CTID_PROMPT_VERSION,
     CTIDMappingError,
     FHGenieCTIDCVEMapper,
     empty_ctid_mappings,
 )
 from app.enrichment.fh_genie import (
-    PROMPT_VERSION,
-    SYSTEM_PROMPT,
-    DescriptionEvidence,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
     normalized_description_evidence,
@@ -118,9 +108,7 @@ class CVEAnalysisService:
     async def analyze(self, cve_id: str) -> CVEAnalysis:
         normalized_id = normalize_cve_id(cve_id)
         await self.graph.verify_taxonomy()
-        cve = await self.graph.cached_cve(normalized_id, self.settings.cache_ttl_seconds)
-        if cve is None:
-            cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
+        cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
         if self.settings.ctid_only_mode:
             return await self._analyze_ctid_only(cve)
         selected = select_references(cve.references, self.settings.advisory_allowed_domains)
@@ -177,11 +165,7 @@ class CVEAnalysisService:
                 )
                 warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
 
-        model = self.agent.model if self.agent else "unconfigured"
-        cache_key = self._cache_key(fetched, model, description)
         has_evidence = bool(fetched or description)
-        # Exploit extraction is intentionally never read from cache: each analysis request
-        # gets exactly one fresh model extraction when source evidence is available.
         steps = []
         if not has_evidence:
             warnings.append("No trusted description or advisory evidence was available")
@@ -206,16 +190,7 @@ class CVEAnalysisService:
                     if result.extraction_status == ExtractionStatus.COMPLETED:
                         result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
 
-        await self.graph.replace_analysis(
-            cve,
-            fetched,
-            steps,
-            cache_key=cache_key,
-            model=model,
-            prompt_version=PROMPT_VERSION,
-        )
         mappings: list[AttackMapping] = []
-        mapping_completed = False
         if steps and self.mapper is None:
             warnings.append("FH Genie ATT&CK mapper is not configured")
         elif steps and self.mapper is not None:
@@ -241,26 +216,9 @@ class CVEAnalysisService:
                     candidates[step.step] = candidate_list
             try:
                 mappings = await self.mapper.map_steps(cve, steps, candidates)
-                mapping_completed = True
             except MappingResponseError as exc:
                 warnings.append(str(exc))
-            if mapping_completed:
-                await self.graph.replace_attack_mappings(
-                    cve.cve_id,
-                    mappings,
-                    model=self.mapper.model,
-                    prompt_version=MAPPING_PROMPT_VERSION,
-                )
         attack_chain = attack_chain_from_mappings(steps, mappings) if steps else []
-        if attack_chain:
-            await self.graph.replace_validated_attack_chain(
-                cve.cve_id,
-                attack_chain,
-                mapping_model=self.mapper.model if self.mapper else "unconfigured",
-                mapping_prompt_version=MAPPING_PROMPT_VERSION,
-                validation_model="disabled",
-                validation_prompt_version="disabled",
-            )
         cve_level_mappings = empty_ctid_mappings()
         if not self.settings.enable_ctid_mapping:
             logger.info(
@@ -282,17 +240,6 @@ class CVEAnalysisService:
                 )
                 warnings.append(f"CVE-level CTID mapping failed: {exc}")
                 cve_level_mappings = empty_ctid_mappings()
-        if self.settings.enable_ctid_mapping:
-            try:
-                await self.graph.replace_cve_level_attack_mappings(
-                    cve.cve_id,
-                    cve_level_mappings,
-                    model=self.ctid_mapper.model if self.ctid_mapper else "unconfigured",
-                    prompt_version=CTID_PROMPT_VERSION,
-                )
-            except GraphUnavailable as exc:
-                warnings.append(str(exc))
-        subgraph = await self.graph.subgraph(cve.cve_id)
         return CVEAnalysis(
             cve=cve,
             description_evidence=description_result,
@@ -301,7 +248,7 @@ class CVEAnalysisService:
             attack_mappings=mappings,
             attack_chain=attack_chain,
             cve_level_attack_mappings=cve_level_mappings,
-            subgraph=subgraph,
+            subgraph=EvidenceSubgraph(),
             warnings=list(dict.fromkeys(warnings)),
         )
 
@@ -330,12 +277,6 @@ class CVEAnalysisService:
             except (CTIDMappingError, GraphUnavailable):
                 logger.exception("CTID-only mapping failed", extra={"cve_id": cve.cve_id})
                 raise
-            await self.graph.replace_cve_level_attack_mappings(
-                cve.cve_id,
-                mappings,
-                model=self.ctid_mapper.model,
-                prompt_version=CTID_DESCRIPTION_PROMPT_VERSION,
-            )
         return CVEAnalysis(
             cve=cve,
             exploit_steps=[],
@@ -345,24 +286,3 @@ class CVEAnalysisService:
             subgraph=EvidenceSubgraph(),
             warnings=list(dict.fromkeys(warnings)),
         )
-
-    @staticmethod
-    def _cache_key(
-        advisories: list[FetchedAdvisory],
-        model: str,
-        description: DescriptionEvidence | None = None,
-    ) -> str:
-        material = "\0".join(
-            [
-                model,
-                PROMPT_VERSION,
-                hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
-                *(
-                    [description.source_name, description.source_url, description.text]
-                    if description
-                    else []
-                ),
-                *sorted(item.checksum for item in advisories),
-            ]
-        )
-        return hashlib.sha256(material.encode()).hexdigest()

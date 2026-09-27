@@ -120,11 +120,10 @@ Recommended application settings:
 NVD_API_KEY=<secret>
 HTTP_TIMEOUT_SECONDS=30
 HTTP_MAX_RETRIES=3
-CACHE_TTL_SECONDS=3600
 MAPPING_MIN_CONFIDENCE=0.50
 VALIDATION_MIN_CONFIDENCE=0.5
 ENABLE_LLM_VALIDATION=false
-ENABLE_CTID_MAPPING=false
+ENABLE_CTID_MAPPING=true
 CTID_ONLY_MODE=false
 LLM_VALIDATION_CONFIDENCE_THRESHOLD=0.8
 ADVISORY_ALLOWED_DOMAINS=offseq.com
@@ -239,7 +238,7 @@ curl --fail-with-body \
   --data '{"cve_ids":["CVE-2021-44228"]}'
 ```
 
-The default response contains only the CVE ID and required attack-chain fields:
+The default response contains the CVE ID, required attack-chain fields, and the three CTID groups:
 
 ```json
 [
@@ -254,7 +253,12 @@ The default response contains only the CVE ID and required attack-chain fields:
         "confidence": 0.9,
         "mapped": true
       }
-    ]
+    ],
+    "ctid_map": {
+      "exploitation_techniques": [],
+      "primary_impacts": [],
+      "secondary_impacts": []
+    }
   }
 ]
 ```
@@ -265,22 +269,25 @@ analysis fields.
 
 ## CTID modes
 
-The normal attack-chain response is produced with:
+The normal attack-chain response with CTID output is produced with:
 
 ```env
-ENABLE_CTID_MAPPING=false
+ENABLE_CTID_MAPPING=true
 CTID_ONLY_MODE=false
 ```
 
-Set `ENABLE_CTID_MAPPING=true` to calculate additional CTID mappings in the full analysis. Set
+Set `ENABLE_CTID_MAPPING=false` only when CTID calculation must be disabled. Set
 `CTID_ONLY_MODE=true` only for a dedicated description-based CTID workflow; that mode does not
 produce the normal attack-chain response.
 
 ## Operational data
 
-- Neo4j stores ATT&CK data, cached CVE records, extracted steps, mappings, and graph provenance.
-- `CACHE_TTL_SECONDS` controls reuse of cached normalized CVE records. A value of `0` disables that
-  cache.
+- Neo4j stores only Enterprise ATT&CK techniques, tactics, their relationships, and the ATT&CK
+  dataset-release marker.
+- CVE records, advisories, evidence, exploit steps, mappings, validation results, and CTID results
+  remain in process memory only until the response is serialized. They are never written to Neo4j.
+- Each request retrieves CVE source data again. Restarting the API does not lose any required CVE
+  state because no per-CVE state is retained.
 - Runtime diagnostic logs are written below `logs/` and may contain CVE-derived model responses.
   Protect them, apply retention limits, and do not ship them to public storage.
 - Output written with the CLI `--output` option may contain security-analysis data. Treat it as an

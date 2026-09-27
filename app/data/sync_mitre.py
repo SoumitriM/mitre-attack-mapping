@@ -179,15 +179,23 @@ async def load_taxonomy(settings: Settings, data_root: Path) -> None:
         async with driver.session() as session:
             await (
                 await session.run(
-                    "MATCH (n) WHERE n:CWE OR n:CAPEC DETACH DELETE n"
+                    "MATCH (n) WHERE NOT n:AttackTechnique AND NOT n:AttackTactic "
+                    "AND NOT n:DatasetRelease DETACH DELETE n"
                 )
             ).consume()
             await (
                 await session.run(
-                    "MATCH (r:DatasetRelease) WHERE r.name IN ['CWE', 'CAPEC'] DELETE r"
+                    "MATCH (r:DatasetRelease) WHERE r.name <> 'ATT&CK' DELETE r"
                 )
             ).consume()
-            for constraint in ("cwe_id", "capec_id"):
+            for constraint in (
+                "cve_id",
+                "cwe_id",
+                "capec_id",
+                "advisory_url",
+                "evidence_id",
+                "step_id",
+            ):
                 await (
                     await session.run(f"DROP CONSTRAINT {constraint} IF EXISTS")
                 ).consume()

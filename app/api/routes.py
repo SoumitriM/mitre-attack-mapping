@@ -16,7 +16,6 @@ from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVENotAvailable, InvalidCVEID, normalize_cve_id
 from app.models import (
-    AttackChainGraph,
     CVEAnalysis,
     CVELevelAttackMapping,
     MappingProcessingStatus,
@@ -63,6 +62,7 @@ class CompactCTIDMap(BaseModel):
 class CompactCVEAnalysis(BaseModel):
     cve_id: str
     attack_chain: list[CompactAttackStep]
+    ctid_map: CompactCTIDMap
 
 
 class CTIDOnlyAnalysis(BaseModel):
@@ -107,35 +107,12 @@ def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
             )
             for item in result.attack_chain
         ],
+        ctid_map=compact_ctid_map(result),
     )
 
 
 def ctid_only_view(result: CVEAnalysis) -> CTIDOnlyAnalysis:
     return CTIDOnlyAnalysis(ctid_map=compact_ctid_map(result))
-
-
-@router.get("/cve-analysis/{cve_id}/graph", response_model=AttackChainGraph)
-async def attack_chain_graph(cve_id: str) -> AttackChainGraph:
-    settings = get_settings()
-    if settings.neo4j_password is None:
-        raise HTTPException(status_code=503, detail="Neo4j is not configured")
-    try:
-        normalized_id = normalize_cve_id(cve_id)
-    except InvalidCVEID as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    driver = AsyncGraphDatabase.driver(
-        settings.neo4j_uri,
-        auth=(settings.neo4j_username, settings.neo4j_password.get_secret_value()),
-    )
-    try:
-        graph = await GraphRepository(driver).validated_attack_chain_graph(normalized_id)
-        if graph is None:
-            raise HTTPException(status_code=404, detail="CVE analysis was not found")
-        return graph
-    except GraphUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    finally:
-        await driver.close()
 
 
 @router.post(

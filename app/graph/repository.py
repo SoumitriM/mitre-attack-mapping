@@ -71,10 +71,6 @@ class TaxonomyUnavailable(GraphUnavailable):
 class GraphRepository:
     _description_embedding_cache: dict[str, dict[str, tuple[str, list[list[float]]]]] = {}
     CONSTRAINTS = (
-        "CREATE CONSTRAINT cve_id IF NOT EXISTS FOR (n:CVE) REQUIRE n.id IS UNIQUE",
-        "CREATE CONSTRAINT advisory_url IF NOT EXISTS FOR (n:Advisory) REQUIRE n.url IS UNIQUE",
-        "CREATE CONSTRAINT evidence_id IF NOT EXISTS FOR (n:Evidence) REQUIRE n.id IS UNIQUE",
-        "CREATE CONSTRAINT step_id IF NOT EXISTS FOR (n:ExploitStep) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT technique_id IF NOT EXISTS "
         "FOR (n:AttackTechnique) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT tactic_id IF NOT EXISTS FOR (n:AttackTactic) REQUIRE n.id IS UNIQUE",
