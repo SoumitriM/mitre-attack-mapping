@@ -9,16 +9,19 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.enrichment.model_usage import save_model_usage
 from app.models import ExploitStep
 
 logger = logging.getLogger(__name__)
 VECTOR_RETRIEVAL_LIMIT = 20
 BM25_RETRIEVAL_LIMIT = 20
 RERANK_LIMIT = 5
+RERANK_INPUT_LIMIT = 20
 RRF_K = 60
 RERANK_DESCRIPTION_MAX_CHARS = 1200
+RERANK_MAX_COMPLETION_TOKENS = 2048
 EMBEDDING_DOCUMENT_MAX_CHARS = 6000
-NORMALIZED_QUERY_MAX_COMPLETION_TOKENS = 2048
+NORMALIZED_QUERY_MAX_COMPLETION_TOKENS = 512
 RETRIEVAL_LOG_DIR = Path("logs") / "attack-retrieval"
 RERANK_RESPONSE_LOG_DIR = Path("logs") / "fh-genie"
 
@@ -48,8 +51,14 @@ For each supplied candidate, evaluate:
 
 1. REQUIRED BEHAVIOR
    Identify the defining behavior required by the ATT&CK technique.
-   A candidate should rank highly only if that defining behavior is explicitly observed
-   or strongly supported by the exploit-step evidence.
+   Apply both tests to every candidate:
+   - POSITIVE FIT: the observed attacker behavior matches the technique's defining mechanism.
+   - NEGATIVE FIT: no essential defining requirement is absent, contradicted, or only inferred.
+   A candidate must pass both tests to receive a strong score. If an essential defining
+   requirement is absent or contradicted, score the technique <= 0.30. Do not infer a missing
+   requirement from similar terminology, vulnerability category, broad objective, final impact,
+   the existence of a CVE, or related session, authentication, execution, or denial-of-service
+   concepts. Reason from the concrete observed behavior, not mere conceptual relatedness.
 
 2. MECHANISM MATCH
    The attack mechanism must match, not merely the attacker's broad objective.
@@ -59,6 +68,9 @@ For each supplied candidate, evaluate:
    Consider whether the behavior occurs during reconnaissance, initial access,
    execution, persistence, privilege escalation, defense evasion, discovery,
    lateral movement, command and control, or another relevant context.
+   Treat required operational context as part of semantic validity. If a technique requires a
+   materially different context, strongly penalize it. Similar mechanism or terminology is not
+   sufficient when the ATT&CK use case differs.
 
 4. OUTCOME MATCH
    Consider whether the observed result matches the purpose of the candidate technique.
@@ -68,6 +80,12 @@ For each supplied candidate, evaluate:
    Use supplied platform metadata when available.
    Strongly penalize candidates whose required platform or technology is incompatible
    with the observed system.
+
+6. PARENT/SUB-TECHNIQUE SPECIFICITY
+   When comparing a parent technique and its sub-techniques, prefer the most specific
+   supplied sub-technique whose defining behavioral mechanism is explicitly supported
+   by the evidence. Prefer the parent when the evidence does not establish the
+   sub-technique's more specific mechanism.
 
 SCORING GUIDANCE:
 
@@ -85,6 +103,9 @@ IMPORTANT:
 * If the platform is clearly incompatible, score it <= 0.20.
 * Prefer a broader supplied parent technique over an incorrect supplied sub-technique
   when the sub-technique's defining mechanism is not present.
+* Do not prefer a parent merely because it is safer when a supplied sub-technique has explicit
+  behavioral support. Do not prefer a sub-technique merely because a CVE is being exploited.
+* Retrieval scores and ranks are non-authoritative hints and cannot rescue a semantic mismatch.
 
 OUTPUT RULES:
 
@@ -123,7 +144,6 @@ def rerank_system_prompt(candidates: list[dict[str, Any]], expected_count: int) 
         f"Return exactly {expected_count} candidates. Copy every technique ID verbatim "
         "from ALLOWED_TECHNIQUE_IDS. Any other ID makes the entire response invalid."
     )
-
 
 
 class EmbeddingData(Protocol):
@@ -204,6 +224,7 @@ async def normalized_behavior_query(
         max_completion_tokens=NORMALIZED_QUERY_MAX_COMPLETION_TOKENS,
         extra_body={"reasoning_split": True},
     )
+    save_model_usage("query_normalization", model, response, item_id=step.step)
     content = response.choices[0].message.content
     if not content:
         choice = response.choices[0]
@@ -218,9 +239,7 @@ async def normalized_behavior_query(
                 len(reasoning_content) if isinstance(reasoning_content, str) else 0
             ),
             "usage": (
-                usage.model_dump()
-                if usage is not None and hasattr(usage, "model_dump")
-                else None
+                usage.model_dump() if usage is not None and hasattr(usage, "model_dump") else None
             ),
         }
         logger.warning(
@@ -263,17 +282,19 @@ def attack_embedding_documents(record: dict[str, Any]) -> list[str]:
         return [document]
     tactics = record.get("tactics") or []
     tactic_names = [
-        str(item.get("name") or "") if isinstance(item, dict) else str(item)
-        for item in tactics
+        str(item.get("name") or "") if isinstance(item, dict) else str(item) for item in tactics
     ]
-    prefix = "\n".join(
-        (
-            f"MITRE ATT&CK Technique: {record.get('mitre_technique_id') or ''}",
-            f"Name: {record.get('name') or ''}",
-            f"Tactics: {', '.join(filter(None, tactic_names))}",
-            f"Platforms: {', '.join(str(item) for item in record.get('platforms') or [])}",
+    prefix = (
+        "\n".join(
+            (
+                f"MITRE ATT&CK Technique: {record.get('mitre_technique_id') or ''}",
+                f"Name: {record.get('name') or ''}",
+                f"Tactics: {', '.join(filter(None, tactic_names))}",
+                f"Platforms: {', '.join(str(item) for item in record.get('platforms') or [])}",
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
     capacity = EMBEDDING_DOCUMENT_MAX_CHARS - len(prefix)
     segments = [
         f"Description: {record.get('description') or ''}",
@@ -333,9 +354,7 @@ def vector_similarity_scores(
     technique_vectors: dict[str, list[list[float]]],
 ) -> dict[str, float]:
     return {
-        record["mitre_technique_id"]: max(
-            vector_cosine(query_vector, vector) for vector in vectors
-        )
+        record["mitre_technique_id"]: max(vector_cosine(query_vector, vector) for vector in vectors)
         for record in records
         if (vectors := technique_vectors.get(record["mitre_technique_id"]))
     }
@@ -414,8 +433,7 @@ def top_bm25_candidates(
         ),
     )[:limit]
     return [
-        {**item, "bm25_score": scores.get(str(item["mitre_technique_id"]), 0.0)}
-        for item in ranked
+        {**item, "bm25_score": scores.get(str(item["mitre_technique_id"]), 0.0)} for item in ranked
     ]
 
 
@@ -551,9 +569,10 @@ async def rerank_candidates(
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         temperature=0.0,
-        max_completion_tokens=8192,
+        max_completion_tokens=RERANK_MAX_COMPLETION_TOKENS,
         extra_body={"reasoning_split": True},
     )
+    save_model_usage("candidate_reranking", model, response, item_id=step.step)
     content = response.choices[0].message.content
     if not content:
         log_file = _save_rerank_diagnostic(
@@ -602,8 +621,7 @@ async def rerank_candidates(
             parsed_output=parsed_output,
             valid_candidate_count=valid_count,
             parse_error=(
-                f"expected {expected_count} unique candidates, "
-                f"received {len(set(returned_ids))}"
+                f"expected {expected_count} unique candidates, received {len(set(returned_ids))}"
             ),
             status="invalid_candidate_count",
         )

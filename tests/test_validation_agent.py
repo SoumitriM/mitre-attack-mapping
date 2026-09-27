@@ -79,7 +79,12 @@ def candidate(platforms: list[str] | None = None) -> AttackCandidate:
 
 
 def settings() -> Settings:
-    return Settings(_env_file=None, fh_genie_model="test-model")
+    return Settings(
+        _env_file=None,
+        fh_genie_model="test-model",
+        enable_llm_validation=True,
+        llm_validation_confidence_threshold=1.0,
+    )
 
 
 def test_validation_schema_rejects_more_than_one_step() -> None:
@@ -99,6 +104,51 @@ def test_validation_schema_rejects_more_than_one_step() -> None:
         _parse_validation_response(f'{{"steps":[{validated},{validated}]}}')
 
     assert raised.value.failure_reason == "schema_validation_failed"
+
+
+@pytest.mark.asyncio
+async def test_high_confidence_mapping_skips_llm_validation() -> None:
+    item = step()
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock()
+    configured = Settings(
+        _env_file=None,
+        fh_genie_model="test-model",
+        enable_llm_validation=False,
+        llm_validation_confidence_threshold=0.8,
+    )
+
+    chain = await FHGenieValidationAgent(configured, api).validate(
+        cve(), [item], [mapping(item, confidence=0.91)], {"T1105": candidate()}
+    )
+
+    assert chain[0].validation.status == "mapped"
+    assert chain[0].proposed_technique_id == "T1105"
+    api.chat.completions.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_mapping_uses_llm_validation() -> None:
+    item = step()
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response(
+        '{"status":"validated","checks":{"technique_exists":true,'
+        '"tactic_valid":true,"platform_compatible":true,"evidence_support":true,'
+        '"semantic_match":true},"reasoning":"Supported.","validator_confidence":0.7}'
+    ))
+    configured = Settings(
+        _env_file=None,
+        fh_genie_model="test-model",
+        enable_llm_validation=True,
+        llm_validation_confidence_threshold=0.8,
+    )
+
+    chain = await FHGenieValidationAgent(configured, api).validate(
+        cve(), [item], [mapping(item, confidence=0.7)], {"T1105": candidate()}
+    )
+
+    assert chain[0].validation.status == "validated"
+    api.chat.completions.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio

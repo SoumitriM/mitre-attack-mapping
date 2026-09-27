@@ -18,6 +18,7 @@ from app.enrichment.attack_mapper import (
     MappingResponseError,
 )
 from app.enrichment.ctid_mapper import (
+    CTID_DESCRIPTION_PROMPT_VERSION,
     CTID_PROMPT_VERSION,
     CTIDMappingError,
     FHGenieCTIDCVEMapper,
@@ -31,12 +32,7 @@ from app.enrichment.fh_genie import (
     FHGenieEvidenceAgent,
     normalized_description_evidence,
 )
-from app.enrichment.validation_agent import (
-    VALIDATION_PROMPT_VERSION,
-    FHGenieValidationAgent,
-    ValidationResponseError,
-    unvalidated_chain,
-)
+from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
@@ -44,11 +40,60 @@ from app.models import (
     AttackCandidate,
     AttackMapping,
     CVEAnalysis,
+    CVERecord,
     DescriptionEvidenceResult,
+    EvidenceSubgraph,
+    ExploitStep,
     ExtractionStatus,
+    ValidatedAttackStep,
+    ValidationChecks,
+    ValidationDetails,
+    ValidationStatus,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def attack_chain_from_mappings(
+    steps: list[ExploitStep],
+    mappings: list[AttackMapping],
+) -> list[ValidatedAttackStep]:
+    """Present mapping output directly without a second semantic judgment stage."""
+    by_step = {item.step: item for item in mappings}
+    chain: list[ValidatedAttackStep] = []
+    for step in steps:
+        mapping = by_step.get(step.step)
+        mapped = mapping is not None and mapping.mitre_technique_id is not None
+        technique_id = mapping.mitre_technique_id if mapping and mapped else None
+        tactic_id = mapping.mitre_tactic_id if mapping and mapped else None
+        evidence_ids = mapping.evidence_ids if mapping and mapped else []
+        confidence = mapping.confidence if mapping and mapped else 0.0
+        chain.append(
+            ValidatedAttackStep(
+                step=step.step,
+                action=step.action,
+                proposed_technique_id=technique_id,
+                mitre_tactic_id=tactic_id,
+                evidence_ids=evidence_ids,
+                validation=ValidationDetails(
+                    status=(ValidationStatus.MAPPED if mapped else ValidationStatus.UNMAPPED),
+                    checks=ValidationChecks(
+                        technique_exists=mapped,
+                        tactic_valid=mapped,
+                        platform_compatible=mapped,
+                        evidence_support=mapped,
+                        semantic_match=False,
+                    ),
+                    reasoning=(
+                        mapping.reasoning
+                        if mapping is not None
+                        else "No ATT&CK mapping satisfied the configured mapping threshold."
+                    ),
+                    validator_confidence=confidence,
+                ),
+            )
+        )
+    return chain
 
 
 class CVEAnalysisService:
@@ -76,10 +121,10 @@ class CVEAnalysisService:
         cve = await self.graph.cached_cve(normalized_id, self.settings.cache_ttl_seconds)
         if cve is None:
             cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
+        if self.settings.ctid_only_mode:
+            return await self._analyze_ctid_only(cve)
         selected = select_references(cve.references, self.settings.advisory_allowed_domains)
-        advisory_client = AdvisoryClient(
-            self.client, max_bytes=self.settings.advisory_max_bytes
-        )
+        advisory_client = AdvisoryClient(self.client, max_bytes=self.settings.advisory_max_bytes)
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
@@ -135,28 +180,31 @@ class CVEAnalysisService:
         model = self.agent.model if self.agent else "unconfigured"
         cache_key = self._cache_key(fetched, model, description)
         has_evidence = bool(fetched or description)
-        steps = await self.graph.cached_steps(cve.cve_id, cache_key) if has_evidence else None
-        if steps is None:
-            steps = []
-            if not has_evidence:
-                warnings.append("No trusted description or advisory evidence was available")
-            elif self.agent is None:
-                warnings.append("FH Genie is not configured; exploit-step extraction was skipped")
+        # Exploit extraction is intentionally never read from cache: each analysis request
+        # gets exactly one fresh model extraction when source evidence is available.
+        steps = []
+        if not has_evidence:
+            warnings.append("No trusted description or advisory evidence was available")
+        elif self.agent is None:
+            warnings.append(
+                "The selected inference provider is not configured; "
+                "exploit-step extraction was skipped"
+            )
+            if description_result:
+                description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+            for result in results:
+                if result.extraction_status == ExtractionStatus.COMPLETED:
+                    result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+        else:
+            try:
+                steps = await self.agent.extract(cve.cve_id, fetched, description)
+            except ExtractionResponseError as exc:
+                warnings.append(str(exc))
                 if description_result:
                     description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
                 for result in results:
                     if result.extraction_status == ExtractionStatus.COMPLETED:
                         result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-            else:
-                try:
-                    steps = await self.agent.extract(cve.cve_id, fetched, description)
-                except ExtractionResponseError as exc:
-                    warnings.append(str(exc))
-                    if description_result:
-                        description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-                    for result in results:
-                        if result.extraction_status == ExtractionStatus.COMPLETED:
-                            result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
 
         await self.graph.replace_analysis(
             cve,
@@ -171,22 +219,11 @@ class CVEAnalysisService:
         if steps and self.mapper is None:
             warnings.append("FH Genie ATT&CK mapper is not configured")
         elif steps and self.mapper is not None:
-            platforms = sorted(
-                {
-                    platform
-                    for product in cve.affected_products
-                    for platform in product.platforms
-                }
-            )
             candidate_lists = await asyncio.gather(
                 *(
                     self.graph.attack_candidates(
                         step,
-                        platforms,
                         cve_id=cve.cve_id,
-                        cwe_ids=cve.cwe_ids,
-                        capec_ids=cve.capec_ids,
-                        cve_description=cve.description,
                     )
                     for step in steps
                 ),
@@ -214,70 +251,23 @@ class CVEAnalysisService:
                     model=self.mapper.model,
                     prompt_version=MAPPING_PROMPT_VERSION,
                 )
-        attack_chain = []
-        if steps and not mappings:
-            attack_chain = unvalidated_chain(
-                steps, "No ATT&CK mapping was available for independent validation."
-            )
-        elif mappings and self.validator is None:
-            warnings.append("FH Genie ATT&CK validator is not configured")
-            attack_chain = unvalidated_chain(
-                steps, "The proposed mapping was not promoted because validation is unavailable."
-            )
-        elif mappings and self.validator is not None:
-            official = await self.graph.official_attack_context(
-                [
-                    item.mitre_technique_id
-                    for item in mappings
-                    if item.mitre_technique_id is not None
-                ]
-            )
-            graph_facts = await self.graph.validation_facts(
-                cve.cve_id,
-                mappings,
-                sorted(
-                    {
-                        platform
-                        for product in cve.affected_products
-                        for platform in product.platforms
-                    }
-                ),
-            )
-            try:
-                attack_chain = await self.validator.validate(
-                    cve, steps, mappings, official, graph_facts
-                )
-            except ValidationResponseError as exc:
-                logger.error(
-                    "ATT&CK validation pipeline failed",
-                    extra={
-                        "cve_id": cve.cve_id,
-                        "validation_stage": "final_validation",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "failure_reason": exc.failure_reason,
-                        "step": exc.context.get("step"),
-                        "technique_id": exc.context.get("technique_id"),
-                    },
-                )
-                warnings.append(str(exc))
-                attack_chain = unvalidated_chain(
-                    steps,
-                    "The proposed mapping was not promoted because grounded validation failed.",
-                )
+        attack_chain = attack_chain_from_mappings(steps, mappings) if steps else []
         if attack_chain:
             await self.graph.replace_validated_attack_chain(
                 cve.cve_id,
                 attack_chain,
                 mapping_model=self.mapper.model if self.mapper else "unconfigured",
                 mapping_prompt_version=MAPPING_PROMPT_VERSION,
-                validation_model=(
-                    self.validator.model if self.validator else "unconfigured"
-                ),
-                validation_prompt_version=VALIDATION_PROMPT_VERSION,
+                validation_model="disabled",
+                validation_prompt_version="disabled",
             )
         cve_level_mappings = empty_ctid_mappings()
-        if steps and (self.ctid_mapper is None or self.mapper is None or self.validator is None):
+        if not self.settings.enable_ctid_mapping:
+            logger.info(
+                "CTID mapping skipped",
+                extra={"cve_id": cve.cve_id, "ctid_skipped": True},
+            )
+        elif steps and (self.ctid_mapper is None or self.mapper is None or self.validator is None):
             warnings.append("FH Genie CTID CVE-level mapper is not configured")
             cve_level_mappings = empty_ctid_mappings()
         elif steps and self.ctid_mapper and self.mapper and self.validator:
@@ -286,17 +276,22 @@ class CVEAnalysisService:
                     cve, steps, self.graph, self.mapper, self.validator
                 )
             except (CTIDMappingError, GraphUnavailable) as exc:
-                warnings.append(str(exc))
+                logger.exception(
+                    "CVE-level CTID mapping failed",
+                    extra={"cve_id": cve.cve_id, "stage": "cve_level_attack_mappings"},
+                )
+                warnings.append(f"CVE-level CTID mapping failed: {exc}")
                 cve_level_mappings = empty_ctid_mappings()
-        try:
-            await self.graph.replace_cve_level_attack_mappings(
-                cve.cve_id,
-                cve_level_mappings,
-                model=self.ctid_mapper.model if self.ctid_mapper else "unconfigured",
-                prompt_version=CTID_PROMPT_VERSION,
-            )
-        except GraphUnavailable as exc:
-            warnings.append(str(exc))
+        if self.settings.enable_ctid_mapping:
+            try:
+                await self.graph.replace_cve_level_attack_mappings(
+                    cve.cve_id,
+                    cve_level_mappings,
+                    model=self.ctid_mapper.model if self.ctid_mapper else "unconfigured",
+                    prompt_version=CTID_PROMPT_VERSION,
+                )
+            except GraphUnavailable as exc:
+                warnings.append(str(exc))
         subgraph = await self.graph.subgraph(cve.cve_id)
         return CVEAnalysis(
             cve=cve,
@@ -307,6 +302,47 @@ class CVEAnalysisService:
             attack_chain=attack_chain,
             cve_level_attack_mappings=cve_level_mappings,
             subgraph=subgraph,
+            warnings=list(dict.fromkeys(warnings)),
+        )
+
+    async def _analyze_ctid_only(self, cve: CVERecord) -> CVEAnalysis:
+        mappings = empty_ctid_mappings()
+        warnings = list(cve.warnings)
+        if not cve.description:
+            warnings.append("CVE description was unavailable; CTID mapping was skipped")
+        elif self.ctid_mapper is None:
+            raise CTIDMappingError("FH Genie CTID mapper is not configured")
+        else:
+            description = normalized_description_evidence(cve)
+            source_url = (
+                description.source_url
+                if description
+                else f"https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
+            )
+            try:
+                normalized = await self.ctid_mapper.normalize_description(cve)
+                candidates = await self.graph.description_attack_candidates(
+                    cve.cve_id, normalized.model_dump(mode="json")
+                )
+                mappings = await self.ctid_mapper.map_description(
+                    cve, normalized, candidates, source_url=source_url
+                )
+            except (CTIDMappingError, GraphUnavailable):
+                logger.exception("CTID-only mapping failed", extra={"cve_id": cve.cve_id})
+                raise
+            await self.graph.replace_cve_level_attack_mappings(
+                cve.cve_id,
+                mappings,
+                model=self.ctid_mapper.model,
+                prompt_version=CTID_DESCRIPTION_PROMPT_VERSION,
+            )
+        return CVEAnalysis(
+            cve=cve,
+            exploit_steps=[],
+            attack_mappings=[],
+            attack_chain=[],
+            cve_level_attack_mappings=mappings,
+            subgraph=EvidenceSubgraph(),
             warnings=list(dict.fromkeys(warnings)),
         )
 

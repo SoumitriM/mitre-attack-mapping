@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.enrichment.fh_genie import AsyncCompatibleClient
+from app.enrichment.model_usage import save_model_usage
 from app.models import (
     AttackCandidate,
     AttackMapping,
@@ -287,15 +288,11 @@ def evidence_id(
     source_url: str,
     supporting_text: str,
 ) -> str:
-    return hashlib.sha256(
-        f"{source_url}\0{supporting_text}".encode()
-    ).hexdigest()
+    return hashlib.sha256(f"{source_url}\0{supporting_text}".encode()).hexdigest()
 
 
 def normalize_attack_platform(value: str) -> str:
-    normalized = " ".join(
-        value.lower().strip().split()
-    )
+    normalized = " ".join(value.lower().strip().split())
 
     windows_aliases = (
         "windows",
@@ -311,11 +308,7 @@ def normalize_attack_platform(value: str) -> str:
     if "linux" in normalized:
         return "linux"
 
-    if (
-        "macos" in normalized
-        or "mac os" in normalized
-        or "os x" in normalized
-    ):
+    if "macos" in normalized or "mac os" in normalized or "os x" in normalized:
         return "macos"
 
     return normalized
@@ -338,12 +331,10 @@ class FHGenieAttackMapper:
         settings: Settings,
         client: AsyncCompatibleClient,
     ) -> None:
-        if not settings.inference_model:
-            raise ValueError(
-                "FH Genie model is not configured"
-            )
+        if not settings.downstream_model:
+            raise ValueError("FH Genie model is not configured")
 
-        self.model = settings.inference_model
+        self.model = settings.downstream_model
         self.min_confidence = settings.mapping_min_confidence
         self._client = client
 
@@ -429,16 +420,11 @@ class FHGenieAttackMapper:
 
             except MappingResponseError as exc:
                 logger.error(
-                    (
-                        "ATT&CK mapping failed for one step; "
-                        "preserving it as unmapped"
-                    ),
+                    ("ATT&CK mapping failed for one step; preserving it as unmapped"),
                     extra={
                         "cve_id": cve.cve_id,
                         "step": step.step,
-                        "validation_stage": (
-                            "deterministic_mapping"
-                        ),
+                        "validation_stage": ("deterministic_mapping"),
                         "exception_type": type(exc).__name__,
                         "exception_message": str(exc),
                         "failure_reason": exc.failure_reason,
@@ -450,10 +436,7 @@ class FHGenieAttackMapper:
                     action=step.action,
                     mitre_technique_id=None,
                     mitre_tactic_id=None,
-                    reasoning=(
-                        "Mapping rejected by deterministic "
-                        f"validation: {exc}"
-                    ),
+                    reasoning=(f"Mapping rejected by deterministic validation: {exc}"),
                     confidence=0.0,
                     evidence_ids=[],
                 )
@@ -473,9 +456,7 @@ class FHGenieAttackMapper:
             {
                 "cve": {
                     "cve_id": cve.cve_id,
-                    "platforms": sorted(
-                        cve_platforms(cve)
-                    ),
+                    "platforms": sorted(cve_platforms(cve)),
                 },
                 "step": {
                     **step.model_dump(
@@ -483,10 +464,7 @@ class FHGenieAttackMapper:
                         exclude={"evidence"},
                     ),
                     "evidence": evidence,
-                    "candidates": [
-                        item.model_dump(mode="json")
-                        for item in candidates
-                    ],
+                    "candidates": [item.model_dump(mode="json") for item in candidates],
                 },
             },
             ensure_ascii=False,
@@ -496,38 +474,34 @@ class FHGenieAttackMapper:
 
         for attempt in range(2):
             try:
-                response = (
-                    await self._client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": MAPPING_SYSTEM_PROMPT,
-                            },
-                            {
-                                "role": "user",
-                                "content": payload,
-                            },
-                        ],
-                        temperature=0.0,
-                        max_completion_tokens=2048,
-                        extra_body={
-                            "reasoning_split": True
+                response = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": MAPPING_SYSTEM_PROMPT,
                         },
-                    )
+                        {
+                            "role": "user",
+                            "content": payload,
+                        },
+                    ],
+                    temperature=0.0,
+                    max_completion_tokens=1024,
+                    extra_body={"reasoning_split": True},
+                )
+                save_model_usage(
+                    "attack_mapping",
+                    self.model,
+                    response,
+                    cve_id=cve.cve_id,
+                    item_id=step.step,
                 )
 
-                content = (
-                    response
-                    .choices[0]
-                    .message
-                    .content
-                )
+                content = response.choices[0].message.content
 
                 try:
-                    envelope = _parse_mapping_response(
-                        content
-                    )
+                    envelope = _parse_mapping_response(content)
 
                 except MappingResponseError as exc:
                     last_error = exc
@@ -540,17 +514,12 @@ class FHGenieAttackMapper:
                     )
 
                     logger.warning(
-                        (
-                            "FH Genie mapping response "
-                            "parsing failed"
-                        ),
+                        ("FH Genie mapping response parsing failed"),
                         extra={
                             "cve_id": cve.cve_id,
                             "step": step.step,
                             "attempt": attempt + 1,
-                            "failure_reason": (
-                                exc.failure_reason
-                            ),
+                            "failure_reason": (exc.failure_reason),
                             "context": exc.context,
                             "log_file": str(log_file),
                         },
@@ -563,18 +532,9 @@ class FHGenieAttackMapper:
 
                 if len(envelope.mappings) != 1:
                     last_error = MappingResponseError(
-                        (
-                            "Expected exactly one mapping "
-                            "for one exploit step"
-                        ),
-                        failure_reason=(
-                            "mapping_validation_failed"
-                        ),
-                        context={
-                            "mapping_count": len(
-                                envelope.mappings
-                            )
-                        },
+                        ("Expected exactly one mapping for one exploit step"),
+                        failure_reason=("mapping_validation_failed"),
+                        context={"mapping_count": len(envelope.mappings)},
                     )
 
                 elif self._valid_single(
@@ -591,15 +551,9 @@ class FHGenieAttackMapper:
                         extra={
                             "cve_id": cve.cve_id,
                             "step": step.step,
-                            "technique_id": (
-                                mapping.mitre_technique_id
-                            ),
-                            "tactic_id": (
-                                mapping.mitre_tactic_id
-                            ),
-                            "confidence": (
-                                mapping.confidence
-                            ),
+                            "technique_id": (mapping.mitre_technique_id),
+                            "tactic_id": (mapping.mitre_tactic_id),
+                            "confidence": (mapping.confidence),
                         },
                     )
 
@@ -607,29 +561,19 @@ class FHGenieAttackMapper:
 
                 else:
                     last_error = MappingResponseError(
-                        (
-                            "FH Genie selected an unsupported "
-                            "ATT&CK mapping"
-                        ),
-                        failure_reason=(
-                            "mapping_validation_failed"
-                        ),
+                        ("FH Genie selected an unsupported ATT&CK mapping"),
+                        failure_reason=("mapping_validation_failed"),
                     )
 
                 log_file = _save_mapping_response_log(
                     cve.cve_id,
                     step.step,
                     content or "(empty response)",
-                    failure_reason=(
-                        "mapping_validation_failed"
-                    ),
+                    failure_reason=("mapping_validation_failed"),
                 )
 
                 logger.warning(
-                    (
-                        "FH Genie mapping failed "
-                        "deterministic validation"
-                    ),
+                    ("FH Genie mapping failed deterministic validation"),
                     extra={
                         "cve_id": cve.cve_id,
                         "step": step.step,
@@ -684,32 +628,19 @@ class FHGenieAttackMapper:
         evidence: list[dict[str, Any]],
     ) -> bool:
         # Step identity must be preserved exactly.
-        if (
-            mapping.step != step.step
-            or mapping.action != step.action
-        ):
+        if mapping.step != step.step or mapping.action != step.action:
             return False
 
         # Mapping may only reference evidence supplied
         # with this exploit step.
-        allowed_evidence = {
-            item["id"]
-            for item in evidence
-        }
+        allowed_evidence = {item["id"] for item in evidence}
 
-        if not set(
-            mapping.evidence_ids
-        ).issubset(
-            allowed_evidence
-        ):
+        if not set(mapping.evidence_ids).issubset(allowed_evidence):
             return False
 
         # Null mapping.
         if mapping.mitre_technique_id is None:
-            return (
-                mapping.mitre_tactic_id is None
-                and mapping.confidence <= 0.33
-            )
+            return mapping.mitre_tactic_id is None and mapping.confidence <= 0.33
 
         # Technique MUST be one of the supplied
         # top candidate techniques.
@@ -717,10 +648,7 @@ class FHGenieAttackMapper:
             (
                 item
                 for item in candidates
-                if (
-                    item.mitre_technique_id
-                    == mapping.mitre_technique_id
-                )
+                if (item.mitre_technique_id == mapping.mitre_technique_id)
             ),
             None,
         )
@@ -730,26 +658,17 @@ class FHGenieAttackMapper:
 
         # Tactic MUST be an official tactic for
         # that selected ATT&CK candidate.
-        if (
-            mapping.mitre_tactic_id
-            not in candidate.tactics.values()
-        ):
+        if mapping.mitre_tactic_id not in candidate.tactics.values():
             return False
 
         # Platform compatibility check.
         platforms = cve_platforms(cve)
 
         candidate_platforms = {
-            normalize_attack_platform(item)
-            for item in candidate.platforms
-            if item
+            normalize_attack_platform(item) for item in candidate.platforms if item
         }
 
-        if (
-            platforms
-            and candidate_platforms
-            and not platforms & candidate_platforms
-        ):
+        if platforms and candidate_platforms and not platforms & candidate_platforms:
             return False
 
         # Positive mappings require strong confidence.
@@ -774,10 +693,7 @@ class FHGenieAttackMapper:
         if len(mappings) != len(steps):
             return False
 
-        by_step = {
-            item.step: item
-            for item in mappings
-        }
+        by_step = {item.step: item for item in mappings}
 
         return all(
             step.step in by_step

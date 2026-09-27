@@ -4,6 +4,8 @@ from app.models.analysis import (
     AttackChainGraph,
     AttackMapping,
     AttackMappingEnvelope,
+    ClaudeExploitStep,
+    ClaudeExploitStepEnvelope,
     CVEAnalysis,
     CVEAttackBehavior,
     CVEAttackBehaviorEnvelope,
@@ -26,7 +28,6 @@ from app.models.analysis import (
     ValidatedAttackStep,
     ValidationChecks,
     ValidationDetails,
-    ValidationEnvelope,
     ValidationStatus,
 )
 from app.models.cve import (
@@ -50,6 +51,8 @@ __all__ = [
     "AttackCandidate",
     "AttackMapping",
     "AttackMappingEnvelope",
+    "ClaudeExploitStep",
+    "ClaudeExploitStepEnvelope",
     "CVEAnalysis",
     "CVEAttackBehavior",
     "CVEAttackBehaviorEnvelope",
@@ -72,6 +75,5 @@ __all__ = [
     "ValidatedAttackStep",
     "ValidationChecks",
     "ValidationDetails",
-    "ValidationEnvelope",
     "ValidationStatus",
 ]

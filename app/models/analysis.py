@@ -50,9 +50,32 @@ class ExploitStep(BaseModel):
 
     step: int = Field(ge=1)
     action: str = Field(min_length=1)
+    confidence: float = Field(default=1.0, ge=0, le=1)
     prerequisites: list[str] = Field(default_factory=list)
-    outcome: str = Field(min_length=1)
+    outcome: str = ""
     evidence: list[StepEvidence] = Field(min_length=1)
+
+
+class ClaudeExploitStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step: int = Field(ge=1)
+    action: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ClaudeExploitStepEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    exploit_steps: list[ClaudeExploitStep] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sequential_steps(self) -> "ClaudeExploitStepEnvelope":
+        if [item.step for item in self.exploit_steps] != list(
+            range(1, len(self.exploit_steps) + 1)
+        ):
+            raise ValueError("exploit steps must be sequential starting at 1")
+        return self
 
 
 class ExploitStepEnvelope(BaseModel):
@@ -84,6 +107,12 @@ class AttackCandidate(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     tactics: dict[str, str] = Field(default_factory=dict)
     procedure_examples: list[str] = Field(default_factory=list)
+    retrieved_by: list[str] = Field(default_factory=list)
+    bm25_rank: int | None = None
+    bm25_score: float | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+    combined_score: float | None = None
 
 
 class AttackMapping(BaseModel):
@@ -155,18 +184,20 @@ class CVEAttackBehaviorEnvelope(BaseModel):
         for prefix, items in groups:
             if any(not item.id.startswith(prefix) for item in items):
                 raise ValueError(f"stage behavior IDs must start with {prefix}")
+        exploitation_ids = {item.id for item in self.exploitation_techniques}
         primary_ids = {item.id for item in self.primary_impacts}
-        for item in self.exploitation_techniques + self.primary_impacts:
-            if item.enabled_by:
-                raise ValueError("only secondary impacts may have enabled_by links")
-        for item in self.secondary_impacts:
-            if not item.enabled_by or not set(item.enabled_by) <= primary_ids:
-                raise ValueError("secondary impacts must reference existing primary impacts")
+        if any(item.enabled_by for item in self.exploitation_techniques):
+            raise ValueError("exploitation techniques must not have enabled_by links")
+        if any(not set(item.enabled_by) <= exploitation_ids for item in self.primary_impacts):
+            raise ValueError("primary impacts may reference only existing exploitation techniques")
+        if any(not set(item.enabled_by) <= primary_ids for item in self.secondary_impacts):
+            raise ValueError("secondary impacts may reference only existing primary impacts")
         return self
 
 
 class ValidationStatus(StrEnum):
     VALIDATED = "validated"
+    MAPPED = "mapped"
     UNMAPPED = "unmapped"
 
 
@@ -203,7 +234,7 @@ class ValidatedAttackStep(BaseModel):
     def validated_mapping_is_consistent(self) -> "ValidatedAttackStep":
         if (self.proposed_technique_id is None) != (self.mitre_tactic_id is None):
             raise ValueError("technique and tactic IDs must both be present or null")
-        if self.validation.status == ValidationStatus.VALIDATED:
+        if self.validation.status in {ValidationStatus.VALIDATED, ValidationStatus.MAPPED}:
             if self.proposed_technique_id is None or not self.evidence_ids:
                 raise ValueError("validated steps require ATT&CK IDs and evidence IDs")
         elif self.proposed_technique_id is not None or self.validation.validator_confidence > 0.33:
@@ -234,8 +265,11 @@ class CVELevelAttackMapping(BaseModel):
         if self.mitre_technique_id is not None:
             if self.action is None or not self.evidence_ids or self.validation is None:
                 raise ValueError("mapped CVE categories require action, evidence, and validation")
-            if self.validation.status != ValidationStatus.VALIDATED:
-                raise ValueError("mapped CVE categories must be validated")
+            if self.validation.status not in {
+                ValidationStatus.VALIDATED,
+                ValidationStatus.MAPPED,
+            }:
+                raise ValueError("mapped CVE categories must pass deterministic validation")
         elif self.confidence > 0.33:
             raise ValueError("unmapped CVE categories must have low confidence")
         return self
@@ -250,27 +284,26 @@ class CVELevelAttackMappings(BaseModel):
 
     @model_validator(mode="after")
     def valid_stage_ids_and_links(self) -> "CVELevelAttackMappings":
-        groups = (("ET-", self.exploitation_techniques),
-                  ("PI-", self.primary_impacts), ("SI-", self.secondary_impacts))
+        groups = (
+            ("ET-", self.exploitation_techniques),
+            ("PI-", self.primary_impacts),
+            ("SI-", self.secondary_impacts),
+        )
         ids = [item.id for _, items in groups for item in items]
         if len(ids) != len(set(ids)):
             raise ValueError("CVE-level mapping IDs must be unique")
         for prefix, items in groups:
             if any(not item.id.startswith(prefix) for item in items):
                 raise ValueError(f"stage mapping IDs must start with {prefix}")
+        exploitation_ids = {item.id for item in self.exploitation_techniques}
         primary_ids = {item.id for item in self.primary_impacts}
-        if any(item.enabled_by for item in self.exploitation_techniques + self.primary_impacts):
-            raise ValueError("only secondary mappings may have enabled_by links")
-        if any(not item.enabled_by or not set(item.enabled_by) <= primary_ids
-               for item in self.secondary_impacts):
-            raise ValueError("secondary mappings must reference existing primary mappings")
+        if any(item.enabled_by for item in self.exploitation_techniques):
+            raise ValueError("exploitation mappings must not have enabled_by links")
+        if any(not set(item.enabled_by) <= exploitation_ids for item in self.primary_impacts):
+            raise ValueError("primary mappings may reference only existing exploitation mappings")
+        if any(not set(item.enabled_by) <= primary_ids for item in self.secondary_impacts):
+            raise ValueError("secondary mappings may reference only existing primary mappings")
         return self
-
-
-class ValidationEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    steps: list[ValidatedAttackStep] = Field(min_length=1, max_length=1)
 
 
 class GraphNode(BaseModel):
@@ -325,7 +358,7 @@ class AttackChainGraph(BaseModel):
     edges: list[PresentationEdge] = Field(default_factory=list)
     legend: dict[str, str] = Field(
         default_factory=lambda: {
-            "authoritative": "Official CVE/CWE/CAPEC/ATT&CK relationship",
+            "authoritative": "Official CVE/ATT&CK relationship",
             "advisory_derived": "Exploit behavior extracted from advisory evidence",
             "llm_inferred": "ATT&CK mapping proposed by an LLM and independently validated",
         }

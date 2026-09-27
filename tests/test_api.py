@@ -2,7 +2,7 @@ from inspect import signature
 
 from fastapi.testclient import TestClient
 
-from app.api.routes import analyze, compact_analysis_view
+from app.api.routes import AnalyzeRequest, analyze, compact_analysis_view, ctid_only_view
 from app.main import app
 from app.models import CVEAnalysis
 
@@ -28,6 +28,18 @@ def test_compact_response_is_the_default_and_full_response_can_be_requested() ->
     assert signature(analyze).parameters["compact"].default is True
 
 
+def test_analysis_request_accepts_an_array_of_cves() -> None:
+    request = AnalyzeRequest(cve_ids=["CVE-2026-22306", "CVE-2025-0282"])
+
+    assert request.cve_ids == ["CVE-2026-22306", "CVE-2025-0282"]
+
+
+def test_analysis_request_rejects_an_empty_array() -> None:
+    response = TestClient(app).post("/api/cve-analysis", json={"cve_ids": []})
+
+    assert response.status_code == 422
+
+
 def test_serves_dependency_free_visualization() -> None:
     response = TestClient(app).get("/visualization")
 
@@ -37,73 +49,100 @@ def test_serves_dependency_free_visualization() -> None:
 
 
 def test_compact_analysis_view_contains_only_mapping_views() -> None:
-    result = CVEAnalysis.model_validate({
-        "cve": {"cve_id": "CVE-2026-22306", "description": "Test description"},
-        "exploit_steps": [{
-            "step": 1, "action": "Execute payload", "outcome": "Code execution",
-            "evidence": [{
-                "source_url": "https://research.example/advisory",
-                "supporting_text": "The payload executes.",
-            }],
-        }],
-        "attack_chain": [{
-            "step": 1,
-            "action": "Execute payload",
-            "proposed_technique_id": None,
-            "mitre_tactic_id": None,
-            "evidence_ids": [],
-            "validation": {
-                "status": "unmapped",
-                "checks": {
-                    "technique_exists": False,
-                    "tactic_valid": False,
-                    "platform_compatible": False,
-                    "evidence_support": False,
-                    "semantic_match": False,
-                },
-                "reasoning": "No supported mapping.",
-                "validator_confidence": 0.0,
-            },
-        }],
-        "cve_level_attack_mappings": {
-            "exploitation_techniques": [{
-                "id": "ET-1", "action": "Exploit overflow",
-                "mitre_technique_id": "T1203", "mitre_tactic_id": "TA0002",
-                "reasoning": "Validated.", "confidence": 0.9,
-                "evidence_ids": ["ev-1"], "processing_status": "completed",
-                "validation": {
-                    "status": "validated",
-                    "checks": {
-                        "technique_exists": True, "tactic_valid": True,
-                        "platform_compatible": True, "evidence_support": True,
-                        "semantic_match": True,
+    result = CVEAnalysis.model_validate(
+        {
+            "cve": {"cve_id": "CVE-2026-22306", "description": "Test description"},
+            "exploit_steps": [
+                {
+                    "step": 1,
+                    "action": "Execute payload",
+                    "outcome": "Code execution",
+                    "evidence": [
+                        {
+                            "source_url": "https://research.example/advisory",
+                            "supporting_text": "The payload executes.",
+                        }
+                    ],
+                }
+            ],
+            "attack_chain": [
+                {
+                    "step": 1,
+                    "action": "Execute payload",
+                    "proposed_technique_id": None,
+                    "mitre_tactic_id": None,
+                    "evidence_ids": [],
+                    "validation": {
+                        "status": "unmapped",
+                        "checks": {
+                            "technique_exists": False,
+                            "tactic_valid": False,
+                            "platform_compatible": False,
+                            "evidence_support": False,
+                            "semantic_match": False,
+                        },
+                        "reasoning": "No supported mapping.",
+                        "validator_confidence": 0.0,
                     },
-                    "reasoning": "Validated.", "validator_confidence": 0.9,
-                },
-            }],
-            "primary_impacts": [{
-                "id": "PI-1", "action": "Obtain code execution", "enabled_by": ["ET-1"],
-                "mitre_technique_id": None, "mitre_tactic_id": None,
-                "reasoning": "Direct impact.", "confidence": 0.0,
-                "evidence_ids": ["ev-1"], "processing_status": "completed",
-            }],
-            "secondary_impacts": [],
-        },
-        "warnings": ["not exposed"],
-    })
+                }
+            ],
+            "cve_level_attack_mappings": {
+                "exploitation_techniques": [
+                    {
+                        "id": "ET-1",
+                        "action": "Exploit overflow",
+                        "mitre_technique_id": "T1203",
+                        "mitre_tactic_id": "TA0002",
+                        "reasoning": "Validated.",
+                        "confidence": 0.9,
+                        "evidence_ids": ["ev-1"],
+                        "processing_status": "completed",
+                        "validation": {
+                            "status": "validated",
+                            "checks": {
+                                "technique_exists": True,
+                                "tactic_valid": True,
+                                "platform_compatible": True,
+                                "evidence_support": True,
+                                "semantic_match": True,
+                            },
+                            "reasoning": "Validated.",
+                            "validator_confidence": 0.9,
+                        },
+                    }
+                ],
+                "primary_impacts": [
+                    {
+                        "id": "PI-1",
+                        "action": "Obtain code execution",
+                        "enabled_by": ["ET-1"],
+                        "mitre_technique_id": None,
+                        "mitre_tactic_id": None,
+                        "reasoning": "Direct impact.",
+                        "confidence": 0.0,
+                        "evidence_ids": ["ev-1"],
+                        "processing_status": "completed",
+                    }
+                ],
+                "secondary_impacts": [],
+            },
+            "warnings": ["not exposed"],
+        }
+    )
 
     compact = compact_analysis_view(result).model_dump(mode="json")
 
-    assert set(compact) == {
-        "cve_id", "description", "exploit_steps", "attack_chain", "ctid_map"
-    }
+    assert set(compact) == {"cve_id", "attack_chain"}
     assert compact["cve_id"] == "CVE-2026-22306"
-    assert compact["description"] == "Test description"
-    assert compact["exploit_steps"] == [{"step": 1, "action": "Execute payload"}]
-    assert compact["attack_chain"] == [{
-        "step": 1, "action": "Execute payload", "technique_id": None,
-        "tactic_id": None, "status": "unmapped",
-    }]
-    assert compact["ctid_map"]["exploitation_techniques"][0]["technique_id"] == "T1203"
-    assert compact["ctid_map"]["primary_impacts"][0]["enabled_by"] == ["ET-1"]
+    assert compact["attack_chain"] == [
+        {
+            "step": 1,
+            "action": "Execute payload",
+            "technique_id": None,
+            "tactic_id": None,
+            "confidence": 0.0,
+            "mapped": False,
+        }
+    ]
+    assert set(ctid_only_view(result).model_dump(mode="json")) == {"ctid_map"}
     assert "warnings" not in compact

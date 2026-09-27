@@ -12,6 +12,7 @@ from app.enrichment.attack_mapper import (
     normalize_attack_platform,
 )
 from app.enrichment.fh_genie import AsyncCompatibleClient
+from app.enrichment.model_usage import save_model_usage
 from app.models import (
     AttackCandidate,
     AttackMapping,
@@ -132,10 +133,12 @@ def _parse_validation_response(content: str | None) -> ValidationDetails:
 
 class FHGenieValidationAgent:
     def __init__(self, settings: Settings, client: AsyncCompatibleClient) -> None:
-        if not settings.inference_model:
+        if not settings.downstream_model:
             raise ValueError("FH Genie model is not configured")
-        self.model = settings.inference_model
+        self.model = settings.downstream_model
         self.min_confidence = settings.validation_min_confidence
+        self.enable_llm_validation = settings.enable_llm_validation
+        self.llm_confidence_threshold = settings.llm_validation_confidence_threshold
         self._client = client
 
     async def validate(
@@ -160,6 +163,18 @@ class FHGenieValidationAgent:
                     semantic_validation_result=None,
                     final_status="unmapped",
                     failure_reason=source["forced_rejection"],
+                )
+                continue
+
+            if not self.enable_llm_validation or not self._requires_llm_validation(source):
+                mapped = self._deterministically_mapped(step, source)
+                final.append(mapped)
+                self._log_diagnostic(
+                    step,
+                    source,
+                    semantic_validation_result=None,
+                    final_status=ValidationStatus.MAPPED.value,
+                    failure_reason=None,
                 )
                 continue
 
@@ -220,8 +235,15 @@ class FHGenieValidationAgent:
                         {"role": "user", "content": payload},
                     ],
                     temperature=0.0,
-                    max_completion_tokens=8192,
+                    max_completion_tokens=1024,
                     extra_body={"reasoning_split": True},
+                )
+                save_model_usage(
+                    "attack_validation",
+                    self.model,
+                    response,
+                    cve_id=cve.cve_id,
+                    item_id=step.step,
                 )
                 content = response.choices[0].message.content
 
@@ -258,9 +280,7 @@ class FHGenieValidationAgent:
                 validated = ValidatedAttackStep(
                     step=step.step,
                     action=step.action,
-                    proposed_technique_id=(
-                        proposed["mitre_technique_id"] if retained else None
-                    ),
+                    proposed_technique_id=(proposed["mitre_technique_id"] if retained else None),
                     mitre_tactic_id=proposed["mitre_tactic_id"] if retained else None,
                     evidence_ids=proposed["evidence_ids"] if retained else [],
                     validation=validation,
@@ -328,8 +348,6 @@ class FHGenieValidationAgent:
                 candidate = official.get(mapping.mitre_technique_id)
                 if facts and not facts.get("evidence_ids_found", False):
                     rejection = "Proposed evidence failed the Neo4j evidence relationship check."
-                elif mapping.confidence < self.min_confidence:
-                    rejection = "The proposed mapping confidence is below the validation threshold."
                 elif candidate is None:
                     rejection = (
                         "The proposed technique is absent from the active official ATT&CK dataset."
@@ -338,9 +356,7 @@ class FHGenieValidationAgent:
                     rejection = "The proposed tactic does not belong to the official technique."
                 else:
                     candidate_platforms = {
-                        normalize_attack_platform(item)
-                        for item in candidate.platforms
-                        if item
+                        normalize_attack_platform(item) for item in candidate.platforms if item
                     }
                     if platforms and candidate_platforms and not platforms & candidate_platforms:
                         rejection = (
@@ -374,6 +390,36 @@ class FHGenieValidationAgent:
 
         return prepared
 
+    def _requires_llm_validation(self, source: dict[str, Any]) -> bool:
+        mapping = source.get("proposed_mapping") or {}
+        return float(mapping.get("confidence", 0.0)) < self.llm_confidence_threshold
+
+    @staticmethod
+    def _deterministically_mapped(step: ExploitStep, source: dict[str, Any]) -> ValidatedAttackStep:
+        proposed = source["proposed_mapping"]
+        return ValidatedAttackStep(
+            step=step.step,
+            action=step.action,
+            proposed_technique_id=proposed["mitre_technique_id"],
+            mitre_tactic_id=proposed["mitre_tactic_id"],
+            evidence_ids=proposed["evidence_ids"],
+            validation=ValidationDetails(
+                status=ValidationStatus.MAPPED,
+                checks=ValidationChecks(
+                    technique_exists=True,
+                    tactic_valid=True,
+                    platform_compatible=True,
+                    evidence_support=True,
+                    semantic_match=False,
+                ),
+                reasoning=(
+                    "Passed deterministic ATT&CK, tactic, platform, candidate, and evidence "
+                    "checks; LLM validation was skipped for this high-confidence mapping."
+                ),
+                validator_confidence=proposed["confidence"],
+            ),
+        )
+
     @staticmethod
     def _valid_semantic(
         item: ValidationDetails,
@@ -393,9 +439,7 @@ class FHGenieValidationAgent:
         return True
 
     @staticmethod
-    def _platform_check(
-        platforms: set[str], candidate: AttackCandidate | None
-    ) -> str:
+    def _platform_check(platforms: set[str], candidate: AttackCandidate | None) -> str:
         if not platforms or candidate is None or not candidate.platforms:
             return "unknown"
         candidate_platforms = {
@@ -426,9 +470,7 @@ class FHGenieValidationAgent:
                 "step": step.step,
                 "proposed_technique_id": mapping.get("mitre_technique_id"),
                 "proposed_tactic_id": mapping.get("mitre_tactic_id"),
-                "technique_lookup_found": facts.get(
-                    "technique_lookup_found", candidate != {}
-                ),
+                "technique_lookup_found": facts.get("technique_lookup_found", candidate != {}),
                 "technique_name": facts.get("technique_name", candidate.get("name")),
                 "technique_platforms": facts.get(
                     "technique_platforms", candidate.get("platforms", [])
@@ -438,9 +480,7 @@ class FHGenieValidationAgent:
                 "tactic_relationship_found": facts.get("tactic_relationship_found"),
                 "evidence_ids_found": facts.get("evidence_ids_found"),
                 "missing_evidence_nodes": facts.get("missing_evidence_nodes", []),
-                "wrong_evidence_relationship": facts.get(
-                    "wrong_evidence_relationship", []
-                ),
+                "wrong_evidence_relationship": facts.get("wrong_evidence_relationship", []),
                 "empty_evidence_text": facts.get("empty_evidence_text", []),
                 "semantic_validation_result": semantic_validation_result,
                 "final_status": final_status,
@@ -484,20 +524,6 @@ class FHGenieValidationAgent:
                 validator_confidence=0.0,
             ),
         )
-
-
-def unvalidated_chain(
-    steps: list[ExploitStep], reason: str
-) -> list[ValidatedAttackStep]:
-    """Fallback for validator execution failure.
-
-    Important: false is not used to imply that ATT&CK facts were checked and failed.
-    The reasoning field makes clear that validation could not be completed.
-    """
-    return [
-        unvalidated_step(step, reason)
-        for step in steps
-    ]
 
 
 def unvalidated_step(step: ExploitStep, reason: str) -> ValidatedAttackStep:

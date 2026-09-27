@@ -4,9 +4,11 @@ Evidence-grounded CVE analysis that combines live NVD and CVE List V5 records,
 trusted security advisories, FH Genie structured extraction, bounded ATT&CK mapping,
 independent validation, and Neo4j provenance.
 
+See [PRODUCTION.md](PRODUCTION.md) for deployment and operations guidance.
+
 ## Current scope
 
-Implemented: normalized CVE metadata, pinned CWE/CAPEC/Enterprise ATT&CK synchronization,
+Implemented: normalized CVE metadata, pinned Enterprise ATT&CK synchronization,
 trusted advisory retrieval, evidence-linked exploit-step extraction, bounded ATT&CK mapping,
 independent validation, final ordered attack-chain generation, additive CTID CVE-level mappings,
 Neo4j storage, FastAPI, and CLI.
@@ -34,6 +36,11 @@ python scripts/configure_from_incident_env.py
 Configure Neo4j and FH Genie in `.env`. An NVD API key is optional but recommended for
 higher rate limits. Never commit `.env`.
 
+Exploit extraction defaults to FH Genie MiniMax with `INFERENCE_PROVIDER=fh_genie`. To switch
+extraction back to OpenRouter, set `INFERENCE_PROVIDER=openrouter` and configure
+`OPENROUTER_KEY`, `OPENROUTER_BASE_URL`, and `OPENROUTER_MODEL`. ATT&CK retrieval, reranking,
+mapping, and CTID mapping continue to use FH Genie.
+
 This Compose stack is named `mitre-attack-chain`, uses its own
 `mitre-attack-chain-neo4j-data` volume, and publishes Neo4j on HTTP port 7475 and Bolt port
 7688. It does not share the sibling project's Neo4j container or data.
@@ -45,7 +52,8 @@ docker compose up -d neo4j
 python -m app.data.sync_mitre
 ```
 
-This command stores only CWE 4.20, CAPEC 3.9, and Enterprise ATT&CK 19.1 locally.
+This command stores only Enterprise ATT&CK 19.1 locally. CWE and CAPEC IDs remain part of
+normalized CVE metadata for model context, but their full taxonomies are not downloaded or stored.
 It does not download or retain the CVE corpus.
 
 Use `--download-only` to verify and extract the datasets without loading Neo4j. Runtime
@@ -55,7 +63,8 @@ under ignored `data/` paths.
 ## Run
 
 ```bash
-python -m app.cli analyze CVE-2026-22306
+python -m app.cli analyze CVE-2026-22306 CVE-2025-0282 \
+  --output output/analyses.json
 uvicorn app.main:app --reload
 ```
 
@@ -64,8 +73,14 @@ Then call:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/cve-analysis \
   -H 'content-type: application/json' \
-  -d '{"cve_id":"CVE-2026-22306"}'
+  -d '{"cve_ids":["CVE-2026-22306","CVE-2025-0282"]}'
 ```
+
+The default response is a JSON array containing one result per requested CVE, in the same order as
+`cve_ids`. Each result contains only `cve_id` and `attack_chain`. Every chain step has the required
+`step`, `action`, `tactic_id`, `technique_id`, `confidence`, and `mapped` fields; IDs are null when
+`mapped` is false. The request must contain at least one CVE ID. Use `?compact=false` only when the
+complete analysis, including source advisories and internal evidence, is required.
 
 Each entry in `attack_mappings` contains exactly the step/action, nullable technique and
 tactic IDs, evidence-grounded reasoning, confidence, and supporting evidence IDs. A step

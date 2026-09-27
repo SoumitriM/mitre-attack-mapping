@@ -7,6 +7,8 @@ import pytest
 from app.enrichment.candidate_retrieval import (
     BM25_RETRIEVAL_LIMIT,
     RERANK_LIMIT,
+    RERANK_MAX_COMPLETION_TOKENS,
+    RERANK_SYSTEM_PROMPT,
     VECTOR_RETRIEVAL_LIMIT,
     RerankEnvelope,
     attack_embedding_documents,
@@ -104,19 +106,28 @@ async def test_normalizes_behavior_for_vector_retrieval() -> None:
     client = MagicMock()
     client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                "normalized_query": (
-                    "Exploit an unauthenticated vulnerability in a public-facing application "
-                    "using a crafted request to achieve remote code execution."
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "normalized_query": (
+                                    "Exploit an unauthenticated vulnerability in a "
+                                    "public-facing application "
+                                    "using a crafted request to achieve remote code execution."
+                                )
+                            }
+                        )
+                    )
                 )
-            })))]
+            ]
         )
     )
     normalized = await normalized_behavior_query(client, "fh-genie", step())
     assert normalized.startswith("Exploit an unauthenticated vulnerability")
     payload = json.loads(client.chat.completions.create.await_args.kwargs["messages"][1]["content"])
     assert payload["action"] == step().action
-    assert client.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 2048
+    assert client.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 512
 
 
 @pytest.mark.asyncio
@@ -129,10 +140,12 @@ async def test_empty_normalized_query_logs_response_metadata(
             id="response-123",
             model="fh-genie",
             usage=SimpleNamespace(model_dump=lambda: {"completion_tokens": 2048}),
-            choices=[SimpleNamespace(
-                finish_reason="length",
-                message=SimpleNamespace(content="", reasoning_content="internal reasoning"),
-            )],
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length",
+                    message=SimpleNamespace(content="", reasoning_content="internal reasoning"),
+                )
+            ],
         )
     )
 
@@ -143,7 +156,8 @@ async def test_empty_normalized_query_logs_response_metadata(
         await normalized_behavior_query(client, "fh-genie", step())
 
     record = next(
-        item for item in caplog.records
+        item
+        for item in caplog.records
         if item.getMessage().startswith("Empty FH Genie normalized-query response metadata")
     )
     assert record.fh_genie_response_metadata == {
@@ -174,10 +188,12 @@ def test_cache_key_changes_for_every_embedded_field_and_model() -> None:
 
 def test_embedding_documents_preserve_all_procedures_with_bounded_chunks() -> None:
     procedures = [f"Procedure {index}: " + "behavior " * 200 for index in range(10)]
-    documents = attack_embedding_documents({
-        **record(1, "T1105"),
-        "procedure_examples": procedures,
-    })
+    documents = attack_embedding_documents(
+        {
+            **record(1, "T1105"),
+            "procedure_examples": procedures,
+        }
+    )
     assert len(documents) > 1
     assert all(len(document) <= 6000 for document in documents)
     assert all(procedure.strip() in " ".join(documents) for procedure in procedures)
@@ -216,13 +232,9 @@ def test_bm25_recovers_public_facing_exploitation_candidate() -> None:
     records[24] = {
         **record(24, "T1190"),
         "name": "Exploit Public-Facing Application",
-        "description": (
-            "Adversaries may exploit a weakness in an Internet-facing host or system."
-        ),
+        "description": ("Adversaries may exploit a weakness in an Internet-facing host or system."),
     }
-    scores = bm25_scores(
-        "Exploit SQL injection in a public-facing application", records
-    )
+    scores = bm25_scores("Exploit SQL injection in a public-facing application", records)
     candidates = top_bm25_candidates(records, scores)
     assert len(candidates) == BM25_RETRIEVAL_LIMIT == 20
     assert candidates[0]["mitre_technique_id"] == "T1190"
@@ -269,7 +281,10 @@ async def test_reranker_returns_exactly_top_5_supplied_candidates() -> None:
     assert "description" in payload["candidates"][0]
     assert all(item in system_prompt for item in ids)
     assert "T1059.003" not in system_prompt
-    assert client.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 8192
+    assert (
+        client.chat.completions.create.await_args.kwargs["max_completion_tokens"]
+        == RERANK_MAX_COMPLETION_TOKENS
+    )
 
 
 @pytest.mark.asyncio
@@ -283,9 +298,7 @@ async def test_reranker_rejects_invented_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_reranker_response_writes_structured_diagnostic(
-    tmp_path, monkeypatch
-) -> None:
+async def test_empty_reranker_response_writes_structured_diagnostic(tmp_path, monkeypatch) -> None:
     import app.enrichment.candidate_retrieval as retrieval
 
     monkeypatch.setattr(retrieval, "RERANK_RESPONSE_LOG_DIR", tmp_path)
@@ -362,3 +375,12 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
     assert payload["raw_bm25_query"] == behavior_query(step())
     assert payload["normalized_vector_query"].startswith("Acquire control")
     assert payload["reranked_candidates"][0]["id"] == "T1583.001"
+
+
+def test_rerank_prompt_requires_semantic_fit_and_specificity() -> None:
+    assert "prefer the most specific" in RERANK_SYSTEM_PROMPT
+    assert "POSITIVE FIT" in RERANK_SYSTEM_PROMPT
+    assert "NEGATIVE FIT" in RERANK_SYSTEM_PROMPT
+    assert "score the technique <= 0.30" in RERANK_SYSTEM_PROMPT
+    assert "materially different context" in RERANK_SYSTEM_PROMPT
+    assert "compound" not in RERANK_SYSTEM_PROMPT.lower()

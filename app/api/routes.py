@@ -3,14 +3,15 @@ from typing import cast
 import httpx
 from fastapi import APIRouter, HTTPException
 from neo4j import AsyncGraphDatabase
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from app.analysis import CVEAnalysisService
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
-from app.enrichment.candidate_retrieval import EmbeddingClient
-from app.enrichment.ctid_mapper import FHGenieCTIDCVEMapper
-from app.enrichment.fh_genie import FHGenieEvidenceAgent
+from app.enrichment.candidate_retrieval import EmbeddingClient, RerankClient
+from app.enrichment.ctid_mapper import CTIDMappingError, FHGenieCTIDCVEMapper
+from app.enrichment.fh_genie import AsyncCompatibleClient, FHGenieEvidenceAgent
 from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVENotAvailable, InvalidCVEID, normalize_cve_id
@@ -26,7 +27,10 @@ router = APIRouter(prefix="/api", tags=["cve"])
 
 
 class AnalyzeRequest(BaseModel):
-    cve_id: str = Field(examples=["CVE-2026-22306"])
+    cve_ids: list[str] = Field(
+        min_length=1,
+        examples=[["CVE-2026-22306", "CVE-2025-0282"]],
+    )
 
 
 class CompactAttackStep(BaseModel):
@@ -34,12 +38,8 @@ class CompactAttackStep(BaseModel):
     action: str
     technique_id: str | None
     tactic_id: str | None
-    status: ValidationStatus
-
-
-class CompactExploitStep(BaseModel):
-    step: int
-    action: str
+    confidence: float
+    mapped: bool
 
 
 class CompactCTIDTechnique(BaseModel):
@@ -62,16 +62,15 @@ class CompactCTIDMap(BaseModel):
 
 class CompactCVEAnalysis(BaseModel):
     cve_id: str
-    description: str | None
-    exploit_steps: list[CompactExploitStep]
     attack_chain: list[CompactAttackStep]
+
+
+class CTIDOnlyAnalysis(BaseModel):
     ctid_map: CompactCTIDMap
 
 
-def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
-    def ctid_item(
-        item: CVELevelAttackMapping, *, linked: bool
-    ) -> CompactCTIDTechnique:
+def compact_ctid_map(result: CVEAnalysis) -> CompactCTIDMap:
+    def ctid_item(item: CVELevelAttackMapping, *, linked: bool) -> CompactCTIDTechnique:
         values = {
             "id": item.id,
             "action": item.action,
@@ -84,35 +83,35 @@ def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
         return CompactCTIDTechnique(**values)
 
     mappings = result.cve_level_attack_mappings
+    return CompactCTIDMap(
+        exploitation_techniques=[
+            ctid_item(item, linked=False) for item in mappings.exploitation_techniques
+        ],
+        primary_impacts=[ctid_item(item, linked=True) for item in mappings.primary_impacts],
+        secondary_impacts=[ctid_item(item, linked=True) for item in mappings.secondary_impacts],
+    )
+
+
+def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
     return CompactCVEAnalysis(
         cve_id=result.cve.cve_id,
-        description=result.cve.description,
-        exploit_steps=[
-            CompactExploitStep(step=item.step, action=item.action)
-            for item in result.exploit_steps
-        ],
         attack_chain=[
             CompactAttackStep(
                 step=item.step,
                 action=item.action,
                 technique_id=item.proposed_technique_id,
                 tactic_id=item.mitre_tactic_id,
-                status=item.validation.status,
+                confidence=item.validation.validator_confidence,
+                mapped=item.validation.status
+                in {ValidationStatus.MAPPED, ValidationStatus.VALIDATED},
             )
             for item in result.attack_chain
         ],
-        ctid_map=CompactCTIDMap(
-            exploitation_techniques=[
-                ctid_item(item, linked=False) for item in mappings.exploitation_techniques
-            ],
-            primary_impacts=[
-                ctid_item(item, linked=True) for item in mappings.primary_impacts
-            ],
-            secondary_impacts=[
-                ctid_item(item, linked=True) for item in mappings.secondary_impacts
-            ],
-        ),
     )
+
+
+def ctid_only_view(result: CVEAnalysis) -> CTIDOnlyAnalysis:
+    return CTIDOnlyAnalysis(ctid_map=compact_ctid_map(result))
 
 
 @router.get("/cve-analysis/{cve_id}/graph", response_model=AttackChainGraph)
@@ -139,44 +138,89 @@ async def attack_chain_graph(cve_id: str) -> AttackChainGraph:
         await driver.close()
 
 
-@router.post("/cve-analysis", response_model=CVEAnalysis | CompactCVEAnalysis)
+@router.post(
+    "/cve-analysis",
+    response_model=list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis],
+)
 async def analyze(
     request: AnalyzeRequest, compact: bool = True
-) -> CVEAnalysis | CompactCVEAnalysis:
+) -> list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis]:
     settings = get_settings()
     if settings.neo4j_password is None:
         raise HTTPException(status_code=503, detail="Neo4j is not configured")
+    try:
+        cve_ids = [normalize_cve_id(cve_id) for cve_id in request.cve_ids]
+    except InvalidCVEID as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_username, settings.neo4j_password.get_secret_value()),
     )
     try:
+        agent: FHGenieEvidenceAgent | None
+        mapper: FHGenieAttackMapper | None
+        ctid_mapper: FHGenieCTIDCVEMapper | None
+        downstream_client: AsyncCompatibleClient | None
         try:
-            agent = FHGenieEvidenceAgent(settings)
-            mapper = FHGenieAttackMapper(settings, agent.client)
-            validator = FHGenieValidationAgent(settings, agent.client)
-            ctid_mapper = FHGenieCTIDCVEMapper(mapper.model, agent.client)
+            if settings.ctid_only_mode:
+                if not (
+                    settings.fh_genie_key and settings.fh_genie_base_url and settings.fh_genie_model
+                ):
+                    raise ValueError("FH Genie is required for CTID-only mode")
+                downstream_client = cast(
+                    AsyncCompatibleClient,
+                    AsyncOpenAI(
+                        api_key=settings.fh_genie_key.get_secret_value(),
+                        base_url=settings.fh_genie_base_url,
+                    ),
+                )
+                agent = None
+                mapper = None
+                validator = None
+                ctid_mapper = FHGenieCTIDCVEMapper(settings.fh_genie_model, downstream_client)
+            else:
+                agent = FHGenieEvidenceAgent(settings)
+                downstream_client = agent.downstream_client
+                mapper = FHGenieAttackMapper(settings, downstream_client)
+                validator = FHGenieValidationAgent(settings, downstream_client)
+                ctid_mapper = (
+                    FHGenieCTIDCVEMapper(mapper.model, downstream_client)
+                    if settings.enable_ctid_mapping
+                    else None
+                )
         except ValueError:
             agent = None
             mapper = None
             validator = None
             ctid_mapper = None
+            downstream_client = None
         graph = GraphRepository(
             driver,
-            cast(EmbeddingClient, agent.embedding_client) if agent else None,
-            settings.fh_genie_embedding_model if agent else None,
-            agent.client if agent else None,
-            agent.model if agent else None,
+            cast(EmbeddingClient, downstream_client) if downstream_client else None,
+            settings.fh_genie_embedding_model if downstream_client else None,
+            cast(RerankClient, downstream_client) if downstream_client else None,
+            settings.downstream_model if downstream_client else None,
+            settings.attack_embedding_cache_path,
         )
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            result = await CVEAnalysisService(
+            service = CVEAnalysisService(
                 settings, graph, client, agent, mapper, validator, ctid_mapper
-            ).analyze(request.cve_id)
-            return compact_analysis_view(result) if compact else result
+            )
+            results = [await service.analyze(cve_id) for cve_id in cve_ids]
+            if settings.ctid_only_mode:
+                return [ctid_only_view(result) for result in results]
+            if compact:
+                return [compact_analysis_view(result) for result in results]
+            return [
+                cast(CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis, result)
+                for result in results
+            ]
     except InvalidCVEID as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CVENotAvailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except CTIDMappingError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except GraphUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

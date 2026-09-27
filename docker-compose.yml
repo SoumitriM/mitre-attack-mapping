@@ -12,14 +12,11 @@ services:
     volumes:
       - neo4j-data:/data
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          cypher-shell -u '${NEO4J_USERNAME:-neo4j}' -p '${NEO4J_PASSWORD}'
-          'RETURN 1' >/dev/null 2>&1
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/7687'"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
 
 volumes:
   neo4j-data:
