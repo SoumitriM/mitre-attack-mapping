@@ -26,11 +26,34 @@ BOILERPLATE = re.compile(
 CVE_ID = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 MIRROR_HOSTS = {"packetstormsecurity.com", "www.exploit-db.com"}
 
-SYSTEM_PROMPT = """Compress the supplied cleaned security-advisory passages into one concise
-technical passage. Include only how the attack happens: prerequisites, attacker actions,
-exploitation mechanism, and direct outcome. Exclude remediation, detection guidance, attribution,
-campaign narrative, and unrelated vulnerabilities. Do not add facts absent from the passages.
-Return strict JSON with exactly this shape: {"passage":"..."}
+SYSTEM_PROMPT = """You compress security-advisory evidence for later attack-chain extraction.
+
+Use only facts explicitly supported by the supplied passages. Do not use outside knowledge, fill
+gaps, infer hidden implementation details, or turn a CWE label into a claimed mechanism. If the
+sources do not explain a transition, state only the supported facts on either side or omit the
+transition. If passages conflict or an affected-version range is ambiguous, omit that claim rather
+than choosing or combining versions.
+
+Write one compact technical passage of 3-7 short sentences in chronological order. Preserve
+distinct attack stages instead of merging them into one broad statement. Include, when explicitly
+supported:
+1. the prerequisite or exposed component the attacker reaches;
+2. the attacker-controlled input or concrete attacker action;
+3. how the vulnerable component processes that input;
+4. each source-supported intermediate transition;
+5. the immediate technical result, such as file creation, command injection, or code execution;
+6. source-supported post-exploitation actions or effects, clearly separated from the vulnerability's
+   direct result.
+
+Keep concrete objects, interfaces, protocols, privilege levels, and action order when the passages
+state them. Do not add exploit strings or examples unless they appear in the supplied evidence.
+Do not claim that an observed action is required or universal. Exclude remediation, mitigations,
+patch or fixed-version details, detection guidance, indicators, attribution, threat-actor names,
+campaign narrative, publication history, severity scores, and unrelated vulnerabilities.
+
+Return one valid JSON object with exactly one key and no Markdown or commentary:
+{"passage":"..."}
+The passage value must be a single JSON string and must not contain headings, lists, or citations.
 """
 
 
