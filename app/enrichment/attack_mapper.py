@@ -487,7 +487,7 @@ class FHGenieAttackMapper:
                         },
                     ],
                     temperature=0.0,
-                    max_completion_tokens=1024,
+                    max_completion_tokens=4096,
                     extra_body={"reasoning_split": True},
                 )
                 save_model_usage(

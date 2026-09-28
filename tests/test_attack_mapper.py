@@ -75,6 +75,7 @@ async def test_accepts_mapping_at_acceptance_threshold() -> None:
 
     assert mappings[0].mitre_technique_id == "T1105"
     assert mappings[0].confidence == 0.50
+    assert api.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 4096
 
 
 @pytest.mark.asyncio
