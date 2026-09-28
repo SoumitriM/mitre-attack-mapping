@@ -1,6 +1,10 @@
-from scripts.preview_advisory_compression import SYSTEM_PROMPT
+from scripts.preview_advisory_compression import MAX_SUCCESSFUL_ADVISORIES, SYSTEM_PROMPT
 
 NORMALIZED_PROMPT = " ".join(SYSTEM_PROMPT.lower().split())
+
+
+def test_preview_reads_at_most_five_successful_advisories() -> None:
+    assert MAX_SUCCESSFUL_ADVISORIES == 5
 
 
 def test_compression_prompt_preserves_attack_chain_detail() -> None:

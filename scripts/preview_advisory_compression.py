@@ -14,7 +14,7 @@ from app.advisory.client import AdvisoryClient, SelectedReference, select_refere
 from app.config import Settings
 from app.ingestion.service import CVEIngestionService
 
-MAX_SUCCESSFUL_ADVISORIES = 2
+MAX_SUCCESSFUL_ADVISORIES = 5
 PASSAGE_CHARS = 4_000
 BOILERPLATE = re.compile(
     r"(?i)(cookie|privacy policy|terms (?:of use|and conditions)|all rights reserved|"
