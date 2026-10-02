@@ -10,6 +10,7 @@ from app.advisory.client import (
     UnsupportedAdvisoryContent,
     select_references,
 )
+from app.advisory.compression import MAX_SUCCESSFUL_ADVISORIES, advisory_priority
 from app.config import Settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper, MappingResponseError
 from app.enrichment.ctid_mapper import (
@@ -111,7 +112,10 @@ class CVEAnalysisService:
         cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
         if self.settings.ctid_only_mode:
             return await self._analyze_ctid_only(cve)
-        selected = select_references(cve.references, self.settings.advisory_allowed_domains)
+        selected = sorted(
+            select_references(cve.references, self.settings.advisory_allowed_domains),
+            key=advisory_priority,
+        )
         advisory_client = AdvisoryClient(self.client, max_bytes=self.settings.advisory_max_bytes)
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
@@ -127,16 +131,14 @@ class CVEAnalysisService:
             else None
         )
 
-        async def fetch_one(
-            item: SelectedReference,
-        ) -> tuple[SelectedReference, FetchedAdvisory | Exception]:
+        async def fetch_one(item: SelectedReference) -> FetchedAdvisory | Exception:
             try:
-                return item, await advisory_client.fetch(item)
+                return await advisory_client.fetch(item)
             except Exception as exc:
-                return item, exc
+                return exc
 
-        outcomes = await asyncio.gather(*(fetch_one(item) for item in selected))
-        for selected_item, outcome in outcomes:
+        for selected_item in selected:
+            outcome = await fetch_one(selected_item)
             if isinstance(outcome, FetchedAdvisory):
                 fetched.append(outcome)
                 results.append(
@@ -149,6 +151,8 @@ class CVEAnalysisService:
                         extraction_status=ExtractionStatus.COMPLETED,
                     )
                 )
+                if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
+                    break
             else:
                 status = (
                     ExtractionStatus.UNSUPPORTED_CONTENT

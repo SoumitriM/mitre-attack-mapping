@@ -136,8 +136,10 @@ content the deployment is expected to retrieve.
 
 ### Switching to OpenRouter
 
-Only exploit-step extraction switches providers. Embeddings, ATT&CK reranking, mapping, and CTID
-mapping continue to use FH Genie.
+Only exploit-step extraction switches providers. Embeddings, ATT&CK reranking, ATT&CK mapping,
+and CTID mapping continue to use FH Genie. Before extraction, the service fetches at most two successful
+vendor-prioritized advisories, removes boilerplate and duplicate or unrelated passages, and uses
+FH Genie MiniMax to create the compact attack passage. OpenRouter receives only that passage.
 
 ```env
 INFERENCE_PROVIDER=openrouter

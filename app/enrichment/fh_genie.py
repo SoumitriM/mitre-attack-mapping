@@ -11,6 +11,11 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from app.advisory.client import FetchedAdvisory
+from app.advisory.compression import (
+    COMPRESSION_SYSTEM_PROMPT,
+    clean_and_deduplicate,
+    split_passages,
+)
 from app.config import Settings
 from app.enrichment.model_usage import save_model_usage
 from app.models import (
@@ -272,6 +277,7 @@ class FHGenieEvidenceAgent:
         self,
         settings: Settings,
         client: AsyncCompatibleClient | None = None,
+        downstream_client: AsyncCompatibleClient | None = None,
     ) -> None:
         if (not settings.inference_key or not settings.inference_base_url) and client is None:
             name = settings.inference_provider.upper()
@@ -280,13 +286,14 @@ class FHGenieEvidenceAgent:
             )
         if settings.inference_model is None:
             raise ValueError("An inference model is required for exploit-step extraction")
+        self.settings = settings
         self.provider = settings.inference_provider
         self.model = settings.inference_model
         self._client = client or AsyncOpenAI(
             api_key=settings.inference_key.get_secret_value(),  # type: ignore[union-attr]
             base_url=settings.inference_base_url,
         )
-        self._embedding_client = (
+        self._embedding_client = downstream_client or (
             AsyncOpenAI(
                 api_key=settings.fh_genie_key.get_secret_value(),
                 base_url=settings.fh_genie_base_url,
@@ -332,6 +339,9 @@ class FHGenieEvidenceAgent:
             if description_evidence
             else None
         )
+        original_sources = sources
+        if sources:
+            sources = await self._compress_advisories(cve_id, sources, description)
         payload = json.dumps(
             {"cve_id": cve_id, "description_evidence": description, "advisories": sources},
             ensure_ascii=False,
@@ -402,7 +412,7 @@ class FHGenieEvidenceAgent:
         else:
             evidence_sources = [
                 (item["source_url"], item["text"])
-                for item in ([description] if description else []) + sources
+                for item in ([description] if description else []) + original_sources
             ]
             steps = [
                 ExploitStep(
@@ -425,6 +435,75 @@ class FHGenieEvidenceAgent:
             },
         )
         return steps
+
+    async def _compress_advisories(
+        self,
+        cve_id: str,
+        sources: list[dict[str, str]],
+        description: dict[str, str] | None,
+    ) -> list[dict[str, str]]:
+        texts = ([description["text"]] if description else []) + [
+            item["text"] for item in sources
+        ]
+        passages = split_passages(clean_and_deduplicate(cve_id, texts))
+        if not passages:
+            return sources
+        fallback_passage = "\n".join(passages)
+        compression_model = self.settings.downstream_model
+        first = sources[0]
+        if not compression_model:
+            return [
+                {
+                    **first,
+                    "source_type": "deterministic_advisory_reduction",
+                    "text": fallback_passage,
+                }
+            ]
+        payload = json.dumps(
+            {
+                "cve_id": cve_id,
+                "passages": [
+                    {"id": index, "text": passage}
+                    for index, passage in enumerate(passages, start=1)
+                ],
+            },
+            ensure_ascii=False,
+        )
+        source_type = "minimax_advisory_summary"
+        try:
+            response = await self._embedding_client.chat.completions.create(
+                model=compression_model,
+                messages=[
+                    {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
+                    {"role": "user", "content": payload},
+                ],
+                temperature=0.0,
+                max_completion_tokens=2048,
+                response_format={"type": "json_object"},
+                extra_body={"reasoning_split": True},
+            )
+            save_model_usage(
+                "advisory_compaction",
+                compression_model,
+                response,
+                cve_id=cve_id,
+                provider="fh_genie",
+            )
+            raw = json.loads(_normalize_json_response(response.choices[0].message.content or ""))
+            if set(raw) != {"passage"} or not isinstance(raw["passage"], str):
+                raise ValueError("advisory compression must return only a passage string")
+            passage = raw["passage"].strip()
+            if not passage:
+                raise ValueError("advisory compression returned an empty passage")
+        except Exception:
+            logger.exception(
+                "FH Genie advisory compression failed; using cleaned passages",
+                extra={"cve_id": cve_id, "passage_count": len(passages)},
+            )
+            passage = fallback_passage
+            source_type = "deterministic_advisory_reduction"
+
+        return [{**first, "source_type": source_type, "text": passage}]
 
     @staticmethod
     def _select_evidence(action: str, sources: list[tuple[str, str]]) -> StepEvidence:

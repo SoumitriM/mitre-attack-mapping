@@ -98,6 +98,55 @@ async def test_claude_extraction_is_one_call_and_hydrates_internal_evidence() ->
     assert request["response_format"] == {"type": "json_object"}
 
 
+@pytest.mark.asyncio
+async def test_openrouter_extraction_receives_minimax_summary_only() -> None:
+    extraction_api = MagicMock()
+    extraction_api.chat.completions.create = AsyncMock(
+        return_value=response(
+            '{"exploit_steps":[{"step":1,"action":"Register the abandoned domain",'
+            '"confidence":0.93}]}'
+        )
+    )
+    minimax_api = MagicMock()
+    minimax_api.chat.completions.create = AsyncMock(
+        return_value=response(
+            '{"passage":"The attacker registers the abandoned domain, causing the client to '
+            'download a payload."}'
+        )
+    )
+    configured = Settings(
+        _env_file=None,
+        inference_provider="openrouter",
+        openrouter_key="openrouter-secret",
+        fh_genie_key="fh-secret",
+        fh_genie_base_url="https://fh.example/v1",
+        fh_genie_model="MiniMaxAI/MiniMax-M2.5",
+    )
+
+    steps = await FHGenieEvidenceAgent(
+        configured, extraction_api, downstream_client=minimax_api
+    ).extract("CVE-2026-22306", [advisory()])
+
+    assert minimax_api.chat.completions.create.await_count == 1
+    assert extraction_api.chat.completions.create.await_count == 1
+    compression_request = minimax_api.chat.completions.create.await_args.kwargs
+    assert compression_request["model"] == "MiniMaxAI/MiniMax-M2.5"
+    extraction_request = extraction_api.chat.completions.create.await_args.kwargs
+    payload = json.loads(extraction_request["messages"][1]["content"])
+    assert payload["advisories"] == [
+        {
+            "source_url": "https://research.example/advisory",
+            "source_type": "minimax_advisory_summary",
+            "source_name": "test",
+            "text": (
+                "The attacker registers the abandoned domain, causing the client to download a "
+                "payload."
+            ),
+        }
+    ]
+    assert steps[0].evidence[0].supporting_text == "The attacker registers the abandoned domain."
+
+
 def response(content: str) -> SimpleNamespace:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
