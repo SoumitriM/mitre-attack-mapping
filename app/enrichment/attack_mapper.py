@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 RESPONSE_LOG_DIR = Path(__file__).parent.parent.parent / "logs" / "fh-genie"
 RESPONSE_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-MAPPING_PROMPT_VERSION = "attack-mapping-v4"
+MAPPING_PROMPT_VERSION = "attack-mapping-v5"
 
 MAPPING_SYSTEM_PROMPT = """
 You map ONE exploit step to MITRE Enterprise ATT&CK.
@@ -56,7 +56,9 @@ Rules:
 
 3. Select at most ONE ATT&CK technique.
 
-4. Select exactly ONE tactic for that technique.
+4. Select exactly ONE tactic for a selected technique, using the current action
+   and its supported lifecycle context. If no single tactic is supported, return null IDs
+   with confidence <= 0.33.
 
 5. The selected tactic MUST be one of the official tactics supplied
    with the selected candidate.
@@ -76,7 +78,13 @@ Rules:
 
 8. Verify platform compatibility when platform information is available.
 
-9. If exactly one candidate is strongly supported:
+9. If multiple candidates are strongly supported, compare defining mechanism first, then
+   lifecycle and deployment context, then supported parent/sub-technique specificity. Prefer
+   the most specific supplied sub-technique only when its distinguishing mechanism is supported.
+   Retrieval rank and score must not break a semantic tie. If ambiguity remains, return null
+   technique and tactic IDs with confidence <= 0.33 and explain the ambiguity.
+
+   If one candidate is uniquely strongest after these comparisons:
    - return its technique ID,
    - return one valid tactic ID,
    - confidence MUST be >= 0.50.

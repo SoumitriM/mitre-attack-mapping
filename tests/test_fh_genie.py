@@ -210,7 +210,7 @@ def extraction_and_grounding_mock(
 
 
 def test_claude_prompt_requires_one_minimal_exploit_step_response() -> None:
-    assert PROMPT_VERSION == "claude-exploit-steps-v4"
+    assert PROMPT_VERSION == "claude-exploit-steps-v5"
     assert "one response" in SYSTEM_PROMPT
     assert '"exploit_steps"' in SYSTEM_PROMPT
     assert '"confidence"' in SYSTEM_PROMPT

@@ -381,6 +381,6 @@ def test_rerank_prompt_requires_semantic_fit_and_specificity() -> None:
     assert "prefer the most specific" in RERANK_SYSTEM_PROMPT
     assert "POSITIVE FIT" in RERANK_SYSTEM_PROMPT
     assert "NEGATIVE FIT" in RERANK_SYSTEM_PROMPT
-    assert "score the technique <= 0.30" in RERANK_SYSTEM_PROMPT
+    assert "score the technique <= 0.20" in RERANK_SYSTEM_PROMPT
     assert "materially different context" in RERANK_SYSTEM_PROMPT
     assert "compound" not in RERANK_SYSTEM_PROMPT.lower()
