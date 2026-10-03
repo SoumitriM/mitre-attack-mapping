@@ -81,6 +81,7 @@ async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
             cast(RerankClient, downstream_client) if downstream_client else None,
             settings.downstream_model if downstream_client else None,
             settings.attack_embedding_cache_path,
+            normalize_vector_queries=settings.enable_query_normalization,
         )
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:

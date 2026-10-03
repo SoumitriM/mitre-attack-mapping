@@ -76,6 +76,10 @@ def test_full_attack_chain_analysis_is_the_default() -> None:
     assert Settings(_env_file=None).ctid_only_mode is False
 
 
+def test_extraction_time_normalization_is_the_default() -> None:
+    assert Settings(_env_file=None).enable_query_normalization is False
+
+
 @pytest.mark.asyncio
 async def test_claude_extraction_is_one_call_and_hydrates_internal_evidence() -> None:
     api = MagicMock()
@@ -206,7 +210,7 @@ def extraction_and_grounding_mock(
 
 
 def test_claude_prompt_requires_one_minimal_exploit_step_response() -> None:
-    assert PROMPT_VERSION == "claude-exploit-steps-v3"
+    assert PROMPT_VERSION == "claude-exploit-steps-v4"
     assert "one response" in SYSTEM_PROMPT
     assert '"exploit_steps"' in SYSTEM_PROMPT
     assert '"confidence"' in SYSTEM_PROMPT
@@ -215,7 +219,11 @@ def test_claude_prompt_requires_one_minimal_exploit_step_response() -> None:
     assert "exactly one atomic technical attacker behavior" in SYSTEM_PROMPT
     assert 'joined by "or", "and", commas, sequential clauses' in SYSTEM_PROMPT
     assert "independently meaningful technical attacker" in SYSTEM_PROMPT
-    assert "its direct outcome may remain in one step" in SYSTEM_PROMPT
+    assert "its direct outcome must remain in one step" in SYSTEM_PROMPT
+    assert "retrieval-ready attacker behavior" in SYSTEM_PROMPT
+    assert "Never generalize" in SYSTEM_PROMPT
+    assert "do not emit a vulnerable system's" in SYSTEM_PROMPT
+    assert "one causal vulnerability mechanism" in SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

@@ -84,6 +84,7 @@ class GraphRepository:
         rerank_client: RerankClient | None = None,
         rerank_model: str | None = None,
         attack_embedding_cache_path: Path | None = None,
+        normalize_vector_queries: bool = True,
     ) -> None:
         self._driver = driver
         self._embedding_client = embedding_client
@@ -91,6 +92,7 @@ class GraphRepository:
         self._rerank_client = rerank_client or cast(RerankClient | None, embedding_client)
         self._rerank_model = rerank_model or embedding_model
         self._attack_embedding_cache_path = attack_embedding_cache_path
+        self._normalize_vector_queries = normalize_vector_queries
         self._technique_embeddings: dict[str, tuple[str, list[list[float]]]] = {}
         self._embedding_lock = asyncio.Lock()
 
@@ -398,31 +400,34 @@ class GraphRepository:
         if self._rerank_client is None or self._rerank_model is None:
             raise GraphUnavailable("FH Genie ATT&CK reranking is not configured")
 
-        normalized_behavior: str | None = None
-        normalization_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                normalized_behavior = await normalized_behavior_query(
-                    self._rerank_client, self._rerank_model, step
-                )
-                break
-            except Exception as exc:
-                normalization_error = exc
+        normalized_behavior: str | None = behavior
+        if self._normalize_vector_queries:
+            normalized_behavior = None
+            normalization_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    normalized_behavior = await normalized_behavior_query(
+                        self._rerank_client, self._rerank_model, step
+                    )
+                    break
+                except Exception as exc:
+                    normalization_error = exc
+                    logger.warning(
+                        "FH Genie behavioral query normalization attempt failed",
+                        extra={"cve_id": cve_id, "step": step.step, "attempt": attempt + 1},
+                    )
+            if normalized_behavior is None:
+                normalized_behavior = behavior
                 logger.warning(
-                    "FH Genie behavioral query normalization attempt failed",
-                    extra={"cve_id": cve_id, "step": step.step, "attempt": attempt + 1},
+                    "FH Genie behavioral query normalization failed; using raw behavior query",
+                    extra={
+                        "cve_id": cve_id,
+                        "step": step.step,
+                        "normalization_error": str(normalization_error),
+                        "raw_behavior_query": behavior,
+                    },
                 )
-        if normalized_behavior is None:
-            normalized_behavior = behavior
-            logger.warning(
-                "FH Genie behavioral query normalization failed; using raw behavior query",
-                extra={
-                    "cve_id": cve_id,
-                    "step": step.step,
-                    "normalization_error": str(normalization_error),
-                    "raw_behavior_query": behavior,
-                },
-            )
+        assert normalized_behavior is not None
 
         try:
             # Cache ATT&CK technique embeddings. They are regenerated only when the

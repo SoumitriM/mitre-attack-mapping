@@ -140,6 +140,8 @@ Only exploit-step extraction switches providers. Embeddings, ATT&CK reranking, A
 and CTID mapping continue to use FH Genie. Before extraction, the service fetches at most two successful
 vendor-prioritized advisories, removes boilerplate and duplicate or unrelated passages, and uses
 FH Genie MiniMax to create the compact attack passage. OpenRouter receives only that passage.
+The extractor emits atomic retrieval-ready actions, and `ENABLE_QUERY_NORMALIZATION=false` keeps
+vector retrieval on those actions without a second LLM rewrite.
 
 ```env
 INFERENCE_PROVIDER=openrouter

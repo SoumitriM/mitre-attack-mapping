@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     fh_genie_base_url: str | None = None
     fh_genie_model: str | None = "MiniMaxAI/MiniMax-M2.5"
     fh_genie_embedding_model: str = "BAAI/bge-m3"
+    enable_query_normalization: bool = False
     attack_embedding_cache_path: Path = Path("data/cache/attack-embeddings.json")
     inference_provider: Literal["fh_genie", "openrouter"] = "fh_genie"
     openrouter_key: SecretStr | None = None
