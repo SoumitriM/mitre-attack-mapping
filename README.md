@@ -103,12 +103,11 @@ contains `exploitation_techniques`, `primary_impacts`, and `secondary_impacts` a
 may contain zero or more independently evidenced behaviors. Secondary impacts identify their
 causal primary impacts through `enabled_by`. Each behavior is derived only from evidence already
 attached to the extracted steps,
-then passed through the same hybrid ATT&CK retrieval, closed-set reranking, mapping, and independent
-validation used by the step pipeline. Unsupported categories remain explicitly unmapped. This
-stage does not use deterministic CWE, CAPEC, CVSS, vulnerability-class, or keyword-to-technique
-rules, and it does not modify `attack_chain`. An evidenced behavior remains in the output with null
-ATT&CK IDs when no suitable technique exists or validation fails; `processing_status` distinguishes
-that semantic result from retrieval, mapping, or validation failures.
+then passed through hybrid ATT&CK retrieval and mapping. CTID responses undergo JSON schema
+validation only; candidate membership, evidence provenance, causal links, platform compatibility,
+and confidence thresholds are not checked, and no independent validator is called. Schema-valid
+behaviors and links are preserved as returned. `processing_status` distinguishes retrieval and
+mapping failures. This stage does not modify `attack_chain` or its validation pipeline.
 
 ## Quality checks
 

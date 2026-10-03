@@ -15,6 +15,7 @@ from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository
 from app.models import (
     AttackCandidate,
+    AttackMapping,
     CVEAttackBehavior,
     CVEAttackBehaviorEnvelope,
     CVELevelAttackMapping,
@@ -22,9 +23,6 @@ from app.models import (
     CVERecord,
     ExploitStep,
     MappingProcessingStatus,
-    ValidationChecks,
-    ValidationDetails,
-    ValidationStatus,
 )
 
 CTID_PROMPT_VERSION = "ctid-cve-behaviors-v4"
@@ -557,8 +555,6 @@ class FHGenieCTIDCVEMapper:
             result = CTIDNormalizedSemantics.model_validate_json(normalized_content)
         except ValidationError as exc:
             raise CTIDMappingError(f"invalid CTID normalization response: {exc}") from exc
-        if any(not item.strip() for group in result.model_dump().values() for item in group):
-            raise CTIDMappingError("CTID normalization returned an empty semantic item")
         self._save_description_diagnostic(
             cve.cve_id,
             "normalization",
@@ -642,29 +638,6 @@ class FHGenieCTIDCVEMapper:
         except ValidationError as exc:
             raise CTIDMappingError(f"invalid CTID description mapping response: {exc}") from exc
 
-        selections_by_role = {
-            "exploitation_techniques": envelope.exploitation_techniques,
-            "primary_impacts": envelope.primary_impacts,
-            "secondary_impacts": envelope.secondary_impacts,
-        }
-        for role, selections in selections_by_role.items():
-            unknown = {item.technique_id for item in selections} - allowed_by_role[role].keys()
-            if unknown:
-                raise CTIDMappingError(
-                    f"CTID mapper returned IDs outside {role} pool: {sorted(unknown)}"
-                )
-
-        et_ids = {f"ET-{index}" for index in range(1, len(envelope.exploitation_techniques) + 1)}
-        pi_ids = {f"PI-{index}" for index in range(1, len(envelope.primary_impacts) + 1)}
-        if any(item.enabled_by for item in envelope.exploitation_techniques):
-            raise CTIDMappingError("CTID exploitation techniques must not populate enabled_by")
-        for item in envelope.primary_impacts:
-            if not item.enabled_by or not set(item.enabled_by) <= et_ids:
-                raise CTIDMappingError("CTID primary impact has invalid or empty enabled_by")
-        for item in envelope.secondary_impacts:
-            if not item.enabled_by or not set(item.enabled_by) <= pi_ids:
-                raise CTIDMappingError("CTID secondary impact has invalid or empty enabled_by")
-
         description_text = cve.description or ""
         description_evidence_id = evidence_id(source_url, description_text)
 
@@ -675,33 +648,17 @@ class FHGenieCTIDCVEMapper:
         ) -> list[CVELevelAttackMapping]:
             converted: list[CVELevelAttackMapping] = []
             for index, selection in enumerate(selections, start=1):
-                candidate = allowed_by_role[role][selection.technique_id]
-                tactic_id = next(iter(candidate.tactics.values()), None)
-                if tactic_id is None:
-                    raise CTIDMappingError(
-                        f"retrieved technique {selection.technique_id} has no ATT&CK tactic"
-                    )
+                candidate = allowed_by_role[role].get(selection.technique_id)
+                tactic_id = next(iter(candidate.tactics.values()), None) if candidate else None
                 converted.append(
                     CVELevelAttackMapping(
                         id=f"{prefix}-{index}",
-                        action=candidate.name,
+                        action=candidate.name if candidate else selection.technique_id,
                         mitre_technique_id=selection.technique_id,
                         mitre_tactic_id=tactic_id,
                         reasoning=selection.reasoning,
                         confidence=1.0,
                         evidence_ids=[description_evidence_id],
-                        validation=ValidationDetails(
-                            status=ValidationStatus.MAPPED,
-                            checks=ValidationChecks(
-                                technique_exists=True,
-                                tactic_valid=True,
-                                platform_compatible=True,
-                                evidence_support=True,
-                                semantic_match=False,
-                            ),
-                            reasoning="Selected by the single closed-set CTID mapping call.",
-                            validator_confidence=1.0,
-                        ),
                         processing_status=MappingProcessingStatus.COMPLETED,
                         enabled_by=selection.enabled_by,
                     )
@@ -825,8 +782,8 @@ class FHGenieCTIDCVEMapper:
                             "\nThe previous response contained these "
                             "validation errors: "
                             f"{json.dumps(result.errors)}. "
-                            "Correct only the schema, evidence, ID, and "
-                            "enabled_by relationship violations. "
+                            "Correct only the schema "
+                            "violations. "
                             "Preserve the intended ET -> PI -> SI "
                             "classification and return the complete JSON "
                             "object again."
@@ -859,7 +816,7 @@ class FHGenieCTIDCVEMapper:
                     "\nPrevious output invalid: "
                     f"{exc}. "
                     "Return only schema-valid JSON following the "
-                    "ET -> PI -> SI causal rules."
+                    "JSON schema."
                 )
 
         if best is not None:
@@ -889,177 +846,28 @@ class FHGenieCTIDCVEMapper:
         if not isinstance(raw, dict):
             raise CTIDMappingError("CTID behavior response must be a JSON object")
 
-        supplied = {
-            (
-                str(evidence.source_url),
-                evidence.supporting_text,
-            )
-            for step in steps
-            for evidence in step.evidence
-        }
-
-        groups: dict[
-            str,
-            list[CVEAttackBehavior],
-        ] = {}
-
+        groups: dict[str, list[CVEAttackBehavior]] = {}
         errors: list[dict[str, object]] = []
-        relationship_warnings: list[dict[str, object]] = []
-
-        seen: set[str] = set()
-
-        specs = (
-            (
-                "exploitation_techniques",
-                "ET-",
-            ),
-            (
-                "primary_impacts",
-                "PI-",
-            ),
-            (
-                "secondary_impacts",
-                "SI-",
-            ),
-        )
-
-        # --------------------------------------------------------------
-        # Structural validation + evidence validation
-        # --------------------------------------------------------------
-
-        for field, prefix in specs:
-            value = raw.get(
-                field,
-                [],
-            )
-
+        fields = CVEAttackBehaviorEnvelope.model_fields
+        unknown = raw.keys() - fields.keys()
+        if unknown:
+            raise CTIDMappingError(f"unexpected CTID behavior fields: {sorted(unknown)}")
+        for field in fields:
+            value = raw.get(field, [])
+            groups[field] = []
             if not isinstance(value, list):
-                errors.append(
-                    {
-                        "stage": field,
-                        "error": "stage must be an array",
-                    }
-                )
-
-                groups[field] = []
-
+                errors.append({"stage": field, "error": "stage must be an array"})
                 continue
-
-            valid: list[CVEAttackBehavior] = []
-
             for index, item in enumerate(value):
                 try:
-                    behavior = CVEAttackBehavior.model_validate(item)
-
-                    if not behavior.id.startswith(prefix):
-                        raise ValueError(f"{field} item must use {prefix} IDs")
-
-                    if behavior.id in seen:
-                        raise ValueError("invalid or duplicate stage ID")
-
-                    cls._verify_behavior_evidence(
-                        behavior,
-                        supplied,
-                    )
-
-                    # Relationship defects are recoverable. Preserve the
-                    # evidence-valid behavior and normalize only the edge.
-                    if field == "exploitation_techniques" and behavior.enabled_by:
-                        relationship_warnings.append(
-                            {
-                                "stage": field,
-                                "index": index,
-                                "error": "removed enabled_by from root exploitation technique",
-                                "rejected_enabled_by": behavior.enabled_by,
-                            }
-                        )
-                        behavior = behavior.model_copy(update={"enabled_by": []})
-
-                    seen.add(behavior.id)
-
-                    valid.append(behavior)
-
-                except (
-                    ValidationError,
-                    ValueError,
-                    CTIDMappingError,
-                ) as exc:
-                    errors.append(
-                        {
-                            "stage": field,
-                            "index": index,
-                            "error": str(exc),
-                        }
-                    )
-
-            groups[field] = valid
-
-        # --------------------------------------------------------------
-        # Validate PI -> ET links
-        # --------------------------------------------------------------
-
-        exploitation_ids = {item.id for item in groups["exploitation_techniques"]}
-
-        for index, item in enumerate(groups["primary_impacts"]):
-            normalized = [ref for ref in item.enabled_by if ref in exploitation_ids]
-            rejected = [ref for ref in item.enabled_by if ref not in exploitation_ids]
-            if rejected:
-                relationship_warnings.append(
-                    {
-                        "stage": "primary_impacts",
-                        "index": index,
-                        "error": "removed enabled_by references to unknown exploitation techniques",
-                        "rejected_enabled_by": rejected,
-                    }
-                )
-                groups["primary_impacts"][index] = item.model_copy(
-                    update={"enabled_by": normalized}
-                )
-
-        # --------------------------------------------------------------
-        # Validate SI -> PI links
-        # --------------------------------------------------------------
-
-        primary_ids = {item.id for item in groups["primary_impacts"]}
-
-        for index, item in enumerate(groups["secondary_impacts"]):
-            normalized = [ref for ref in item.enabled_by if ref in primary_ids]
-            rejected = [ref for ref in item.enabled_by if ref not in primary_ids]
-            if rejected:
-                relationship_warnings.append(
-                    {
-                        "stage": "secondary_impacts",
-                        "index": index,
-                        "error": "removed enabled_by references to unknown primary impacts",
-                        "rejected_enabled_by": rejected,
-                    }
-                )
-                groups["secondary_impacts"][index] = item.model_copy(
-                    update={"enabled_by": normalized}
-                )
-
+                    groups[field].append(CVEAttackBehavior.model_validate(item))
+                except ValidationError as exc:
+                    errors.append({"stage": field, "index": index, "error": str(exc)})
         return BehaviorParseResult(
             envelope=CVEAttackBehaviorEnvelope.model_validate(groups),
             errors=errors,
-            relationship_warnings=relationship_warnings,
+            relationship_warnings=[],
         )
-
-    @staticmethod
-    def _verify_behavior_evidence(
-        behavior: CVEAttackBehavior,
-        supplied: set[tuple[str, str]],
-    ) -> None:
-        if not behavior.evidence:
-            raise CTIDMappingError("behavior must contain at least one evidence object")
-
-        for item in behavior.evidence:
-            key = (
-                str(item.source_url),
-                item.supporting_text,
-            )
-
-            if key not in supplied:
-                raise CTIDMappingError("behavior evidence is absent from EVIDENCE_CATALOG")
 
     async def map(
         self,
@@ -1067,21 +875,12 @@ class FHGenieCTIDCVEMapper:
         steps: list[ExploitStep],
         graph: GraphRepository,
         mapper: FHGenieAttackMapper,
-        validator: FHGenieValidationAgent,
+        validator: FHGenieValidationAgent | None = None,
     ) -> CVELevelAttackMappings:
         envelope = await self.identify_behaviors(
             cve,
             steps,
         )
-
-        # ==============================================================
-        # IMPORTANT MODELING RULE
-        #
-        # Try to map ET, PI, and SI where appropriate. The existing
-        # mapper and validator may retain any behavior with null ATT&CK
-        # fields when no valid technique exists.
-        #
-        # ==============================================================
 
         mappable_stages = [
             (
@@ -1182,13 +981,14 @@ class FHGenieCTIDCVEMapper:
                     cve,
                     [step],
                     {step.step: candidates[step.step]},
+                    schema_only=True,
                 )
                 for step in retrievable_steps
             ),
             return_exceptions=True,
         )
 
-        proposals = []
+        proposals: list[AttackMapping] = []
 
         mapping_failures: set[int] = set()
 
@@ -1204,60 +1004,9 @@ class FHGenieCTIDCVEMapper:
                 mapping_failures.add(step.step)
 
             else:
-                proposals.extend(mapping_result)
-
-        # ==============================================================
-        # Load official ATT&CK context
-        # ==============================================================
-
-        official = await graph.official_attack_context(
-            [item.mitre_technique_id for item in proposals if item.mitre_technique_id]
-        )
-
-        proposal_by_step = {item.step: item for item in proposals}
-
-        # ==============================================================
-        # Independent validation
-        # ==============================================================
-
-        validation_inputs = [
-            step
-            for step in retrievable_steps
-            if (step.step not in mapping_failures and step.step in proposal_by_step)
-        ]
-
-        validation_results = await asyncio.gather(
-            *(
-                validator.validate(
-                    cve,
-                    [step],
-                    [proposal_by_step[step.step]],
-                    official,
+                proposals.extend(
+                    item.model_copy(update={"step": step.step}) for item in mapping_result
                 )
-                for step in validation_inputs
-            ),
-            return_exceptions=True,
-        )
-
-        validated = []
-
-        validation_failures: set[int] = set()
-
-        for step, validation_result in zip(
-            validation_inputs,
-            validation_results,
-            strict=True,
-        ):
-            if isinstance(
-                validation_result,
-                BaseException,
-            ):
-                validation_failures.add(step.step)
-
-            else:
-                validated.extend(validation_result)
-
-        checked = {item.step: item for item in validated}
 
         proposed = {item.step: item for item in proposals}
 
@@ -1285,41 +1034,15 @@ class FHGenieCTIDCVEMapper:
             mappable_behaviors,
             start=1,
         ):
-            validation = checked.get(index)
-
-            retained = validation is not None and validation.proposed_technique_id is not None
-
-            technique_id = validation.proposed_technique_id if validation else None
-
-            tactic_id = validation.mitre_tactic_id if validation else None
-
-            retained_evidence = validation.evidence_ids if validation else []
-
-            # ----------------------------------------------------------
-            # Determine processing state.
-            # ----------------------------------------------------------
-
+            proposal = proposed.get(index)
             if index in retrieval_failures:
                 status = MappingProcessingStatus.RETRIEVAL_FAILED
-
-            elif index in mapping_failures:
+            elif index in mapping_failures or (
+                proposal is not None and proposal.reasoning.startswith("Mapping rejected")
+            ):
                 status = MappingProcessingStatus.MAPPING_FAILED
-
-            elif index in validation_failures:
-                status = MappingProcessingStatus.VALIDATION_FAILED
-
             else:
                 status = MappingProcessingStatus.COMPLETED
-
-            proposal = proposed.get(index)
-
-            if proposal and proposal.reasoning.startswith("Mapping rejected"):
-                status = MappingProcessingStatus.MAPPING_FAILED
-
-            if validation and validation.validation.reasoning.startswith(
-                "Validation could not be completed:"
-            ):
-                status = MappingProcessingStatus.VALIDATION_FAILED
 
             behavior_evidence_ids = [
                 evidence_id(
@@ -1336,12 +1059,9 @@ class FHGenieCTIDCVEMapper:
                 MappingProcessingStatus.MAPPING_FAILED: (
                     "ATT&CK mapping failed for this behavior."
                 ),
-                MappingProcessingStatus.VALIDATION_FAILED: (
-                    "ATT&CK validation failed for this behavior."
-                ),
             }.get(
                 status,
-                ("No validated ATT&CK mapping was produced for this behavior."),
+                ("No ATT&CK mapping was produced for this behavior."),
             )
 
             result_groups[stage_name].append(
@@ -1349,12 +1069,11 @@ class FHGenieCTIDCVEMapper:
                     id=behavior.id,
                     action=behavior.action,
                     enabled_by=behavior.enabled_by,
-                    mitre_technique_id=(technique_id if retained else None),
-                    mitre_tactic_id=(tactic_id if retained else None),
-                    reasoning=(validation.validation.reasoning if validation else failure_reason),
-                    confidence=(validation.validation.validator_confidence if validation else 0.0),
-                    evidence_ids=(retained_evidence if retained else behavior_evidence_ids),
-                    validation=(validation.validation if validation else None),
+                    mitre_technique_id=proposal.mitre_technique_id if proposal else None,
+                    mitre_tactic_id=proposal.mitre_tactic_id if proposal else None,
+                    reasoning=proposal.reasoning if proposal else failure_reason,
+                    confidence=proposal.confidence if proposal else 0.0,
+                    evidence_ids=proposal.evidence_ids if proposal else behavior_evidence_ids,
                     processing_status=status,
                 )
             )

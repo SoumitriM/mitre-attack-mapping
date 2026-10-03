@@ -135,7 +135,7 @@ async def test_description_ctid_mapping_uses_one_closed_set_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_description_ctid_mapping_rejects_unretrieved_ids() -> None:
+async def test_description_ctid_mapping_accepts_schema_valid_unretrieved_ids() -> None:
     api = MagicMock()
     api.chat.completions.create = AsyncMock(
         return_value=response(
@@ -144,13 +144,16 @@ async def test_description_ctid_mapping_rejects_unretrieved_ids() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="outside exploitation_techniques pool"):
-        await FHGenieCTIDCVEMapper("test-model", api).map_description(
-            cve(),
-            normalized(),
-            {"exploitation": [], "primary_impact": [], "secondary_impact": []},
-            source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-22306",
-        )
+    mappings = await FHGenieCTIDCVEMapper("test-model", api).map_description(
+        cve(),
+        normalized(),
+        {"exploitation": [], "primary_impact": [], "secondary_impact": []},
+        source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-22306",
+    )
+    assert mappings.exploitation_techniques[0].mitre_technique_id == "T9999"
+    assert mappings.exploitation_techniques[0].mitre_tactic_id is None
+    assert mappings.exploitation_techniques[0].validation is None
+
 
 
 @pytest.mark.asyncio
@@ -256,12 +259,12 @@ def test_valid_et_pi_si_chain_is_preserved() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "stage", "expected_links"),
     [
-        ({"et_enabled_by": ["PI-1"]}, "exploitation_techniques", []),
-        ({"pi_enabled_by": ["ET-404"]}, "primary_impacts", []),
-        ({"si_enabled_by": ["PI-404"]}, "secondary_impacts", []),
+        ({"et_enabled_by": ["PI-1"]}, "exploitation_techniques", ["PI-1"]),
+        ({"pi_enabled_by": ["ET-404"]}, "primary_impacts", ["ET-404"]),
+        ({"si_enabled_by": ["PI-404"]}, "secondary_impacts", ["PI-404"]),
     ],
 )
-def test_invalid_causal_edge_is_removed_without_dropping_behavior(
+def test_schema_valid_causal_edge_is_preserved(
     kwargs: dict[str, list[str]], stage: str, expected_links: list[str]
 ) -> None:
     result = FHGenieCTIDCVEMapper._parse_behaviors(causal_behavior_payload(**kwargs), [step()])
@@ -269,11 +272,11 @@ def test_invalid_causal_edge_is_removed_without_dropping_behavior(
     assert result.errors == []
     assert len(getattr(result.envelope, stage)) == 1
     assert getattr(result.envelope, stage)[0].enabled_by == expected_links
-    assert result.relationship_warnings[0]["stage"] == stage
+    assert result.relationship_warnings == []
 
 
 @pytest.mark.asyncio
-async def test_relationship_normalization_does_not_trigger_retry(tmp_path, monkeypatch) -> None:
+async def test_schema_valid_relationship_does_not_trigger_retry(tmp_path, monkeypatch) -> None:
     import app.enrichment.ctid_mapper as ctid
 
     monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
@@ -284,7 +287,7 @@ async def test_relationship_normalization_does_not_trigger_retry(tmp_path, monke
 
     envelope = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
 
-    assert envelope.primary_impacts[0].enabled_by == []
+    assert envelope.primary_impacts[0].enabled_by == ["ET-404"]
     api.chat.completions.create.assert_awaited_once()
 
 
@@ -409,7 +412,7 @@ async def test_invalid_behavior_envelope_is_logged_and_not_treated_as_empty(
 
 
 @pytest.mark.asyncio
-async def test_maps_supported_categories_through_existing_retrieval_and_validator() -> None:
+async def test_maps_categories_without_independent_validation() -> None:
     item = step()
     ev_id = evidence_id(str(item.evidence[0].source_url), item.evidence[0].supporting_text)
     api = MagicMock()
@@ -476,7 +479,10 @@ async def test_maps_supported_categories_through_existing_retrieval_and_validato
     assert mappings.primary_impacts == []
     graph.attack_candidates.assert_awaited_once()
     mapper.map_steps.assert_awaited_once()
-    validator.validate.assert_awaited_once()
+    validator.validate.assert_not_awaited()
+    graph.official_attack_context.assert_not_awaited()
+    assert mapper.map_steps.await_args.kwargs == {"schema_only": True}
+    assert mappings.exploitation_techniques[0].validation is None
 
 
 @pytest.mark.asyncio
@@ -556,4 +562,19 @@ def test_cve_2025_0282_regression_shape_excludes_reconnaissance() -> None:
         in __import__(
             "app.enrichment.ctid_mapper", fromlist=["CTID_SYSTEM_PROMPT"]
         ).CTID_SYSTEM_PROMPT
+    )
+
+
+def test_schema_valid_unprovenanced_evidence_and_duplicate_ids_are_preserved() -> None:
+    import json
+
+    payload = json.loads(causal_behavior_payload())
+    behavior = payload["exploitation_techniques"][0]
+    behavior["evidence"][0]["supporting_text"] = "Text absent from the supplied evidence."
+    payload["exploitation_techniques"].append(behavior.copy())
+    result = FHGenieCTIDCVEMapper._parse_behaviors(json.dumps(payload), [step()])
+    assert result.errors == []
+    assert len(result.envelope.exploitation_techniques) == 2
+    assert result.envelope.exploitation_techniques[0].evidence[0].supporting_text == (
+        "Text absent from the supplied evidence."
     )

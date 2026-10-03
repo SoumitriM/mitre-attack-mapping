@@ -137,3 +137,40 @@ async def test_accepts_explicit_low_confidence_no_match() -> None:
     mappings = await FHGenieAttackMapper(settings(), api).map_steps(cve(), [step()], {1: []})
 
     assert mappings[0].mitre_technique_id is None
+
+
+@pytest.mark.asyncio
+async def test_ctid_schema_only_mapping_bypasses_semantic_checks() -> None:
+    import json
+
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response(json.dumps({
+        "mappings": [{
+            "step": 99,
+            "action": "Different action",
+            "mitre_technique_id": "T9999",
+            "mitre_tactic_id": None,
+            "reasoning": "Model selection.",
+            "confidence": 0.99,
+            "evidence_ids": [],
+        }]
+    })))
+    mapper = FHGenieAttackMapper(Settings(fh_genie_model="test-model"), api)
+    result = await mapper.map_steps(cve(), [step()], {1: []}, schema_only=True)
+    assert result[0].mitre_technique_id == "T9999"
+    assert result[0].confidence == 0.99
+    api.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ctid_schema_only_mapping_still_rejects_invalid_field_types() -> None:
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response(
+        '{"mappings":[{"step":1,"action":"Action","reasoning":"Reason",'
+        '"confidence":"invalid"}]}'
+    ))
+    mapper = FHGenieAttackMapper(Settings(fh_genie_model="test-model"), api)
+    result = await mapper.map_steps(cve(), [step()], {1: []}, schema_only=True)
+    assert result[0].mitre_technique_id is None
+    assert "schema validation failed" in result[0].reasoning.lower()
+    assert api.chat.completions.create.await_count == 2

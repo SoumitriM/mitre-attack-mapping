@@ -229,10 +229,10 @@ class CVEAnalysisService:
                 "CTID mapping skipped",
                 extra={"cve_id": cve.cve_id, "ctid_skipped": True},
             )
-        elif steps and (self.ctid_mapper is None or self.mapper is None or self.validator is None):
+        elif steps and (self.ctid_mapper is None or self.mapper is None):
             warnings.append("FH Genie CTID CVE-level mapper is not configured")
             cve_level_mappings = empty_ctid_mappings()
-        elif steps and self.ctid_mapper and self.mapper and self.validator:
+        elif steps and self.ctid_mapper and self.mapper:
             try:
                 cve_level_mappings = await self.ctid_mapper.map(
                     cve, steps, self.graph, self.mapper, self.validator

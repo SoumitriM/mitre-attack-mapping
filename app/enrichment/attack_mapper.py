@@ -239,6 +239,8 @@ def _normalize_mapping_json_response(content: str) -> str:
 
 def _parse_mapping_response(
     content: str | None,
+    *,
+    schema_only: bool = False,
 ) -> AttackMappingEnvelope:
     if not content or not content.strip():
         raise MappingResponseError(
@@ -274,7 +276,7 @@ def _parse_mapping_response(
         ) from exc
 
     try:
-        return AttackMappingEnvelope.model_validate(data)
+        return AttackMappingEnvelope.model_validate(data, context={"schema_only": schema_only})
 
     except ValidationError as exc:
         raise MappingResponseError(
@@ -351,6 +353,8 @@ class FHGenieAttackMapper:
         cve: CVERecord,
         steps: list[ExploitStep],
         candidates: dict[int, list[AttackCandidate]],
+        *,
+        schema_only: bool = False,
     ) -> list[AttackMapping]:
         """
         Map every exploit step independently.
@@ -424,6 +428,7 @@ class FHGenieAttackMapper:
                     step,
                     evidence,
                     step_candidates,
+                    schema_only=schema_only,
                 )
 
             except MappingResponseError as exc:
@@ -459,6 +464,8 @@ class FHGenieAttackMapper:
         step: ExploitStep,
         evidence: list[dict[str, Any]],
         candidates: list[AttackCandidate],
+        *,
+        schema_only: bool = False,
     ) -> AttackMapping:
         payload = json.dumps(
             {
@@ -509,7 +516,7 @@ class FHGenieAttackMapper:
                 content = response.choices[0].message.content
 
                 try:
-                    envelope = _parse_mapping_response(content)
+                    envelope = _parse_mapping_response(content, schema_only=schema_only)
 
                 except MappingResponseError as exc:
                     last_error = exc
@@ -537,6 +544,14 @@ class FHGenieAttackMapper:
                         continue
 
                     raise
+
+                if schema_only:
+                    return envelope.mappings[0] if envelope.mappings else AttackMapping(
+                        step=step.step,
+                        action=step.action,
+                        reasoning="No ATT&CK mapping was produced for this behavior.",
+                        confidence=0.0,
+                    )
 
                 if len(envelope.mappings) != 1:
                     last_error = MappingResponseError(

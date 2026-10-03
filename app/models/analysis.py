@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationInfo, model_validator
 
 from app.models.cve import CVERecord
 
@@ -127,7 +127,9 @@ class AttackMapping(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def ids_are_both_present_or_absent(self) -> "AttackMapping":
+    def ids_are_both_present_or_absent(self, info: ValidationInfo) -> "AttackMapping":
+        if info.context and info.context.get("schema_only"):
+            return self
         if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
             raise ValueError("technique and tactic IDs must both be present or null")
         if self.mitre_technique_id is None and self.confidence > 0.33:
@@ -170,29 +172,6 @@ class CVEAttackBehaviorEnvelope(BaseModel):
     exploitation_techniques: list[CVEAttackBehavior] = Field(default_factory=list)
     primary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
     secondary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def valid_stage_ids_and_links(self) -> "CVEAttackBehaviorEnvelope":
-        groups = (
-            ("ET-", self.exploitation_techniques),
-            ("PI-", self.primary_impacts),
-            ("SI-", self.secondary_impacts),
-        )
-        ids = [item.id for _, items in groups for item in items]
-        if len(ids) != len(set(ids)):
-            raise ValueError("CVE-level behavior IDs must be unique")
-        for prefix, items in groups:
-            if any(not item.id.startswith(prefix) for item in items):
-                raise ValueError(f"stage behavior IDs must start with {prefix}")
-        exploitation_ids = {item.id for item in self.exploitation_techniques}
-        primary_ids = {item.id for item in self.primary_impacts}
-        if any(item.enabled_by for item in self.exploitation_techniques):
-            raise ValueError("exploitation techniques must not have enabled_by links")
-        if any(not set(item.enabled_by) <= exploitation_ids for item in self.primary_impacts):
-            raise ValueError("primary impacts may reference only existing exploitation techniques")
-        if any(not set(item.enabled_by) <= primary_ids for item in self.secondary_impacts):
-            raise ValueError("secondary impacts may reference only existing primary impacts")
-        return self
 
 
 class ValidationStatus(StrEnum):
@@ -258,22 +237,6 @@ class CVELevelAttackMapping(BaseModel):
     validation: ValidationDetails | None = None
     processing_status: MappingProcessingStatus = MappingProcessingStatus.COMPLETED
 
-    @model_validator(mode="after")
-    def mapping_is_consistent(self) -> "CVELevelAttackMapping":
-        if (self.mitre_technique_id is None) != (self.mitre_tactic_id is None):
-            raise ValueError("technique and tactic IDs must both be present or null")
-        if self.mitre_technique_id is not None:
-            if self.action is None or not self.evidence_ids or self.validation is None:
-                raise ValueError("mapped CVE categories require action, evidence, and validation")
-            if self.validation.status not in {
-                ValidationStatus.VALIDATED,
-                ValidationStatus.MAPPED,
-            }:
-                raise ValueError("mapped CVE categories must pass deterministic validation")
-        elif self.confidence > 0.33:
-            raise ValueError("unmapped CVE categories must have low confidence")
-        return self
-
 
 class CVELevelAttackMappings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -281,29 +244,6 @@ class CVELevelAttackMappings(BaseModel):
     exploitation_techniques: list[CVELevelAttackMapping] = Field(default_factory=list)
     primary_impacts: list[CVELevelAttackMapping] = Field(default_factory=list)
     secondary_impacts: list[CVELevelAttackMapping] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def valid_stage_ids_and_links(self) -> "CVELevelAttackMappings":
-        groups = (
-            ("ET-", self.exploitation_techniques),
-            ("PI-", self.primary_impacts),
-            ("SI-", self.secondary_impacts),
-        )
-        ids = [item.id for _, items in groups for item in items]
-        if len(ids) != len(set(ids)):
-            raise ValueError("CVE-level mapping IDs must be unique")
-        for prefix, items in groups:
-            if any(not item.id.startswith(prefix) for item in items):
-                raise ValueError(f"stage mapping IDs must start with {prefix}")
-        exploitation_ids = {item.id for item in self.exploitation_techniques}
-        primary_ids = {item.id for item in self.primary_impacts}
-        if any(item.enabled_by for item in self.exploitation_techniques):
-            raise ValueError("exploitation mappings must not have enabled_by links")
-        if any(not set(item.enabled_by) <= exploitation_ids for item in self.primary_impacts):
-            raise ValueError("primary mappings may reference only existing exploitation mappings")
-        if any(not set(item.enabled_by) <= primary_ids for item in self.secondary_impacts):
-            raise ValueError("secondary mappings may reference only existing primary mappings")
-        return self
 
 
 class GraphNode(BaseModel):
