@@ -1,546 +1,293 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.enrichment.attack_mapper import evidence_id
-from app.enrichment.ctid_mapper import (
-    CTIDNormalizedSemantics,
-    FHGenieCTIDCVEMapper,
-)
-from app.models import (
-    AffectedProduct,
-    AttackCandidate,
-    AttackMapping,
-    CVEAttackBehavior,
-    CVEAttackBehaviorEnvelope,
-    CVERecord,
-    ExploitStep,
-)
+from app.analysis import CVEAnalysisService, attack_chain_from_mappings
+from app.config import Settings
+from app.enrichment.ctid_mapper import CTIDMappingError, FHGenieCTIDCVEMapper
+from app.models import AttackMapping, CVELevelAttackMappings, CVERecord, ExploitStep
 
 
-def response(content: str) -> SimpleNamespace:
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+@pytest.fixture(autouse=True)
+def isolate_ctid_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.enrichment.ctid_mapper.CTID_LOG_DIR", tmp_path)
 
 
-def cve() -> CVERecord:
-    return CVERecord(
-        cve_id="CVE-2026-22306",
-        description="A client retrieves an attacker-controlled update.",
-        affected_products=[AffectedProduct(product="OZOLS", platforms=["Windows"])],
-        cwe_ids=["CWE-494"],
-        capec_ids=["CAPEC-187"],
-    )
-
-
-def normalized() -> CTIDNormalizedSemantics:
-    return CTIDNormalizedSemantics(
-        exploitation_behaviors=["Retrieve an attacker-controlled update"],
-        primary_capabilities=["Gain execution of attacker-controlled code"],
-        secondary_behaviors=["Transfer an additional attacker-controlled tool"],
-    )
-
-
-def step() -> ExploitStep:
-    return ExploitStep.model_validate(
-        {
-            "step": 1,
-            "action": "The client downloads a malicious archive",
-            "prerequisites": ["The update endpoint is attacker-controlled"],
-            "outcome": "The archive reaches the host",
-            "evidence": [
-                {
-                    "source_url": "https://research.example/advisory",
-                    "supporting_text": "The client downloads the malicious archive.",
-                }
-            ],
-        }
-    )
-
-
-def behavior_response(evidence_text: str) -> str:
-    return (
-        '{"exploitation_techniques":['
-        '{"id":"ET-1",'
-        '"action":"The client downloads an attacker-controlled archive",'
-        '"prerequisites":["The update endpoint is attacker-controlled"],'
-        '"outcome":"The archive reaches the host","enabled_by":[],"evidence":['
-        '{"source_url":"https://research.example/advisory",'
-        f'"supporting_text":"{evidence_text}"}}],'
-        '"reasoning":"The evidence states the delivery method."}],'
-        '"primary_impacts":[],"secondary_impacts":[]}'
-    )
-
-
-@pytest.mark.asyncio
-async def test_description_normalization_uses_one_call_and_atomic_schema() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(
-            '{"exploitation_behaviors":["Retrieve an attacker-controlled update"],'
-            '"primary_capabilities":["Gain execution of attacker-controlled code"],'
-            '"secondary_behaviors":[]}'
-        )
-    )
-
-    result = await FHGenieCTIDCVEMapper("test-model", api).normalize_description(cve())
-
-    api.chat.completions.create.assert_awaited_once()
-    assert result.exploitation_behaviors == ["Retrieve an attacker-controlled update"]
-    assert result.primary_capabilities == ["Gain execution of attacker-controlled code"]
-    assert result.secondary_behaviors == []
-
-
-@pytest.mark.asyncio
-async def test_description_ctid_mapping_uses_one_closed_set_call() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(
-            '{"exploitation_techniques":[{"technique_id":"T1190",'
-            '"reasoning":"The description directly states exploitation."}],'
-            '"primary_impacts":[],"secondary_impacts":[]}'
-        )
-    )
-    candidate = AttackCandidate(
-        mitre_technique_id="T1190",
-        name="Exploit Public-Facing Application",
-        description="Exploit a weakness in an Internet-facing system.",
-        tactics={"initial-access": "TA0001"},
-        retrieved_by=["exploitation_behaviors[0]"],
-    )
-
-    mappings = await FHGenieCTIDCVEMapper("test-model", api).map_description(
-        cve(),
-        normalized(),
-        {"exploitation": [candidate], "primary_impact": [], "secondary_impact": []},
-        source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-22306",
-    )
-
-    api.chat.completions.create.assert_awaited_once()
-    assert mappings.exploitation_techniques[0].mitre_technique_id == "T1190"
-    assert mappings.primary_impacts == []
-    request = api.chat.completions.create.await_args.kwargs
-    assert request["response_format"] == {"type": "json_object"}
-    payload = request["messages"][1]["content"]
-    assert "exploitation_candidates" in payload
-    assert "primary_impact_candidates" in payload
-    assert "secondary_impact_candidates" in payload
-    assert '"normalized"' in payload
-    assert "exploitation_behaviors[0]" in payload
-    assert "T1190" in payload
-
-
-@pytest.mark.asyncio
-async def test_description_ctid_mapping_accepts_schema_valid_unretrieved_ids() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(
-            '{"exploitation_techniques":[{"technique_id":"T9999",'
-            '"reasoning":"Unsupported."}],"primary_impacts":[],"secondary_impacts":[]}'
-        )
-    )
-
-    mappings = await FHGenieCTIDCVEMapper("test-model", api).map_description(
-        cve(),
-        normalized(),
-        {"exploitation": [], "primary_impact": [], "secondary_impact": []},
-        source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-22306",
-    )
-    assert mappings.exploitation_techniques[0].mitre_technique_id == "T9999"
-    assert mappings.exploitation_techniques[0].mitre_tactic_id is None
-    assert mappings.exploitation_techniques[0].validation is None
-
-
-@pytest.mark.asyncio
-async def test_description_ctid_mapping_preserves_role_specific_causal_links() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(
-            '{"exploitation_techniques":[{"technique_id":"T1190",'
-            '"reasoning":"Direct exploit.","enabled_by":[]}],'
-            '"primary_impacts":[{"technique_id":"T1059",'
-            '"reasoning":"Immediate execution.","enabled_by":["ET-1"]}],'
-            '"secondary_impacts":[{"technique_id":"T1105",'
-            '"reasoning":"Enabled transfer.","enabled_by":["PI-1"]}]}'
-        )
-    )
-    et = AttackCandidate(
-        mitre_technique_id="T1190",
-        name="Exploit Public-Facing Application",
-        description="Exploit a public-facing application.",
-        tactics={"initial-access": "TA0001"},
-    )
-    pi = AttackCandidate(
-        mitre_technique_id="T1059",
-        name="Command and Scripting Interpreter",
-        description="Execute commands.",
-        tactics={"execution": "TA0002"},
-    )
-    si = AttackCandidate(
-        mitre_technique_id="T1105",
-        name="Ingress Tool Transfer",
-        description="Transfer tools.",
-        tactics={"command-and-control": "TA0011"},
-    )
-
-    mappings = await FHGenieCTIDCVEMapper("test-model", api).map_description(
-        cve(),
-        normalized(),
-        {"exploitation": [et], "primary_impact": [pi], "secondary_impact": [si]},
-        source_url="https://nvd.nist.gov/vuln/detail/CVE-2026-22306",
-    )
-
-    assert mappings.primary_impacts[0].enabled_by == ["ET-1"]
-    assert mappings.secondary_impacts[0].enabled_by == ["PI-1"]
-
-
-def causal_behavior_payload(
-    *,
-    et_enabled_by: list[str] | None = None,
-    pi_enabled_by: list[str] | None = None,
-    si_enabled_by: list[str] | None = None,
-) -> str:
-    import json
-
-    evidence = [
-        {
+def sources():
+    actions = [
+        "Send a crafted request to exploit the server",
+        "Execute commands through the compromised service",
+        "Clear the service logs using the gained execution capability",
+    ]
+    steps = [ExploitStep.model_validate({
+        "step": index,
+        "action": action,
+        "outcome": "Command execution obtained" if index == 1 else "Observed consequence",
+        "evidence": [{
             "source_url": "https://research.example/advisory",
-            "supporting_text": "The client downloads the malicious archive.",
-        }
-    ]
-    common = {"prerequisites": [], "evidence": evidence, "reasoning": "Direct evidence."}
-    return json.dumps(
-        {
-            "exploitation_techniques": [
-                {
-                    "id": "ET-1",
-                    "action": "Trigger a stack-based buffer overflow",
-                    "outcome": "The vulnerable return address is overwritten",
-                    "enabled_by": et_enabled_by or [],
-                    **common,
-                }
-            ],
-            "primary_impacts": [
-                {
-                    "id": "PI-1",
-                    "action": "Obtain remote code execution",
-                    "outcome": "Code execution is available",
-                    "enabled_by": ["ET-1"] if pi_enabled_by is None else pi_enabled_by,
-                    **common,
-                }
-            ],
-            "secondary_impacts": [
-                {
-                    "id": "SI-1",
-                    "action": "Clear forensic logs",
-                    "outcome": "Evidence is impaired",
-                    "enabled_by": ["PI-1"] if si_enabled_by is None else si_enabled_by,
-                    **common,
-                }
-            ],
-        }
-    )
+            "supporting_text": "A crafted request permits command execution and log removal.",
+        }],
+    }) for index, action in enumerate(actions, start=1)]
+    mappings = [AttackMapping(
+        step=index, action=action,
+        mitre_technique_id=technique, mitre_tactic_id=tactic,
+        reasoning="Existing attack mapping.", confidence=0.8,
+        evidence_ids=[f"existing-evidence-{index}"],
+    ) for index, (action, technique, tactic) in enumerate(zip(
+        actions, ["T1190", "T1059", "T1070"], ["TA0001", "TA0002", "TA0005"], strict=True
+    ), start=1)]
+    return steps, mappings, attack_chain_from_mappings(steps, mappings)
 
 
-def test_valid_et_pi_si_chain_is_preserved() -> None:
-    result = FHGenieCTIDCVEMapper._parse_behaviors(causal_behavior_payload(), [step()])
+def node(prefix, index, action, source_step, supporting_steps, enabled_by):
+    return {
+        "id": f"{prefix}-{index}", "action": action, "source_step": source_step,
+        "supporting_steps": supporting_steps, "enabled_by": enabled_by,
+        "reasoning": "Evidence establishes this causal relationship.",
+    }
 
-    assert result.errors == []
-    assert result.relationship_warnings == []
-    assert result.envelope.primary_impacts[0].enabled_by == ["ET-1"]
-    assert result.envelope.secondary_impacts[0].enabled_by == ["PI-1"]
+
+def payload(steps, *, outcome_pi=False):
+    return {
+        "exploitation_techniques": [node("ET", 1, steps[0].action, 1, [1], [])],
+        "primary_impacts": [node(
+            "PI", 1, "Command execution obtained" if outcome_pi else steps[1].action,
+            None if outcome_pi else 2, [1] if outcome_pi else [2], ["ET-1"]
+        )],
+        "secondary_impacts": [node("SI", 1, steps[2].action, 3, [3], ["PI-1"])],
+    }
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "stage", "expected_links"),
-    [
-        ({"et_enabled_by": ["PI-1"]}, "exploitation_techniques", ["PI-1"]),
-        ({"pi_enabled_by": ["ET-404"]}, "primary_impacts", ["ET-404"]),
-        ({"si_enabled_by": ["PI-404"]}, "secondary_impacts", ["PI-404"]),
-    ],
-)
-def test_schema_valid_causal_edge_is_preserved(
-    kwargs: dict[str, list[str]], stage: str, expected_links: list[str]
-) -> None:
-    result = FHGenieCTIDCVEMapper._parse_behaviors(causal_behavior_payload(**kwargs), [step()])
-
-    assert result.errors == []
-    assert len(getattr(result.envelope, stage)) == 1
-    assert getattr(result.envelope, stage)[0].enabled_by == expected_links
-    assert result.relationship_warnings == []
+def mapper_for(data):
+    api = MagicMock()
+    content = data if isinstance(data, str) else json.dumps(data)
+    api.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    ))
+    return FHGenieCTIDCVEMapper("test-model", api), api
 
 
 @pytest.mark.asyncio
-async def test_schema_valid_relationship_does_not_trigger_retry(tmp_path, monkeypatch) -> None:
-    import app.enrichment.ctid_mapper as ctid
+async def test_reuses_source_ids_with_one_causal_call_and_no_input_mutation():
+    steps, mappings, chain = sources()
+    before = [[item.model_dump(mode="json") for item in group]
+              for group in (steps, mappings, chain)]
+    ctid, api = mapper_for(payload(steps))
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    api.chat.completions.create.assert_awaited_once()
+    nodes = [result.exploitation_techniques[0], result.primary_impacts[0],
+             result.secondary_impacts[0]]
+    for actual, expected in zip(nodes, mappings, strict=True):
+        assert actual.mitre_technique_id == expected.mitre_technique_id
+        assert actual.mitre_tactic_id == expected.mitre_tactic_id
+        assert actual.confidence == expected.confidence
+        assert actual.evidence_ids == expected.evidence_ids
+        assert actual.validation is None
+    assert nodes[1].enabled_by == ["ET-1"]
+    assert nodes[2].enabled_by == ["PI-1"]
+    assert before == [[item.model_dump(mode="json") for item in group]
+                      for group in (steps, mappings, chain)]
+    assert CVELevelAttackMappings.model_validate_json(result.model_dump_json()) == result
+    request = api.chat.completions.create.await_args.kwargs
+    supplied = json.loads(request["messages"][1]["content"])
+    assert supplied["attack_chain"] == before[2]
+    assert supplied["attack_mappings"] == before[1]
+    assert "candidates" not in supplied
+    assert "not ATT&CK mapping" in request["messages"][0]["content"]
 
-    monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(causal_behavior_payload(pi_enabled_by=["ET-404"]))
-    )
 
-    envelope = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
+@pytest.mark.asyncio
+async def test_outcome_pi_and_si_never_borrow_an_exploit_mapping():
+    steps, mappings, chain = sources()
+    data = payload(steps, outcome_pi=True)
+    data["secondary_impacts"] = [node(
+        "SI", 1, "Audit evidence lost", None, [3], ["PI-1"]
+    )]
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    assert result.exploitation_techniques[0].mitre_technique_id == "T1190"
+    for item in [result.primary_impacts[0], result.secondary_impacts[0]]:
+        assert item.mitre_technique_id is None
+        assert item.mitre_tactic_id is None
+        assert item.confidence == 0.0
+        assert item.evidence_ids
+    assert result.secondary_impacts[0].enabled_by == ["PI-1"]
 
-    assert envelope.primary_impacts[0].enabled_by == ["ET-404"]
+
+@pytest.mark.asyncio
+async def test_unmapped_source_behavior_remains_unmapped_in_every_role():
+    steps, _, _ = sources()
+    mappings = [AttackMapping(step=item.step, action=item.action,
+                              reasoning="No existing mapping.", confidence=0.2) for item in steps]
+    chain = attack_chain_from_mappings(steps, mappings)
+    ctid, _ = mapper_for(payload(steps))
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-57112"), steps, chain, mappings)
+    for item in [*result.exploitation_techniques, *result.primary_impacts,
+                 *result.secondary_impacts]:
+        assert item.mitre_technique_id is None
+        assert item.mitre_tactic_id is None
+
+
+@pytest.mark.asyncio
+async def test_final_chain_nulls_are_not_replaced_by_raw_proposals():
+    steps, proposals, _ = sources()
+    chain = attack_chain_from_mappings(steps, [])
+    ctid, _ = mapper_for(payload(steps))
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-57112"), steps, chain, proposals)
+    for item in [*result.exploitation_techniques, *result.primary_impacts,
+                 *result.secondary_impacts]:
+        assert item.mitre_technique_id is None
+        assert item.mitre_tactic_id is None
+
+
+@pytest.mark.asyncio
+async def test_copies_source_ids_without_semantic_attack_validation():
+    steps, mappings, _ = sources()
+    mappings[0] = mappings[0].model_copy(update={
+        "mitre_technique_id": "T9999", "mitre_tactic_id": "TA9999",
+    })
+    chain = attack_chain_from_mappings(steps, mappings)
+    ctid, _ = mapper_for(payload(steps))
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    assert result.exploitation_techniques[0].mitre_technique_id == "T9999"
+    assert result.exploitation_techniques[0].mitre_tactic_id == "TA9999"
+    assert result.exploitation_techniques[0].validation is None
+
+
+@pytest.mark.asyncio
+async def test_multiple_paths_preserve_separate_et_pi_si_links():
+    steps, mappings, chain = sources()
+    steps[1] = steps[1].model_copy(update={"action": "Exploit a separate endpoint"})
+    chain = attack_chain_from_mappings(steps, mappings)
+    data = {
+        "exploitation_techniques": [
+            node("ET", 1, steps[0].action, 1, [1], []),
+            node("ET", 2, steps[1].action, 2, [2], []),
+        ],
+        "primary_impacts": [
+            node("PI", 1, "First capability obtained", None, [1], ["ET-1"]),
+            node("PI", 2, "Separate capability obtained", None, [2], ["ET-2"]),
+        ],
+        "secondary_impacts": [node("SI", 1, steps[2].action, 3, [3], ["PI-2"])],
+    }
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    assert len(result.exploitation_techniques) == 2
+    assert result.primary_impacts[0].enabled_by == ["ET-1"]
+    assert result.primary_impacts[1].enabled_by == ["ET-2"]
+    assert result.secondary_impacts[0].enabled_by == ["PI-2"]
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing-field", "duplicate-id", "wrong-role-id", "unknown-predecessor", "et-to-si",
+    "et-predecessor", "missing-pi-predecessor", "unknown-source", "unknown-support",
+    "reused-source", "changed-action", "new-technique", "wrong-type", "et-without-source",
+    "source-not-supported",
+])
+@pytest.mark.asyncio
+async def test_rejects_only_structurally_invalid_ctid_responses(invalid):
+    steps, mappings, chain = sources()
+    data = payload(steps)
+    et, pi, si = (data[field][0] for field in (
+        "exploitation_techniques", "primary_impacts", "secondary_impacts"
+    ))
+    if invalid == "missing-field":
+        del et["source_step"]
+    elif invalid == "duplicate-id":
+        data["exploitation_techniques"].append(et.copy())
+    elif invalid == "wrong-role-id":
+        pi["id"] = "ET-2"
+    elif invalid == "unknown-predecessor":
+        pi["enabled_by"] = ["ET-404"]
+    elif invalid == "et-to-si":
+        si["enabled_by"] = ["ET-1"]
+    elif invalid == "et-predecessor":
+        et["enabled_by"] = ["PI-1"]
+    elif invalid == "missing-pi-predecessor":
+        pi["enabled_by"] = []
+    elif invalid == "unknown-source":
+        et["source_step"] = 404
+    elif invalid == "unknown-support":
+        et["supporting_steps"] = [404]
+    elif invalid == "reused-source":
+        pi.update(source_step=1, supporting_steps=[1], action=steps[0].action)
+    elif invalid == "changed-action":
+        pi["action"] = "A newly invented behavior"
+    elif invalid == "new-technique":
+        pi["technique_id"] = "T9999"
+    elif invalid == "wrong-type":
+        et["supporting_steps"] = ["1"]
+    elif invalid == "et-without-source":
+        et["source_step"] = None
+    elif invalid == "source-not-supported":
+        et["supporting_steps"] = [2]
+    ctid, api = mapper_for(data)
+    with pytest.raises(CTIDMappingError, match="invalid CTID causal structure"):
+        await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
     api.chat.completions.create.assert_awaited_once()
 
 
-def test_multiple_stage_items_and_causal_links_are_supported() -> None:
-    evidence = {
-        "source_url": "https://research.example/advisory",
-        "supporting_text": "The client downloads the malicious archive.",
-    }
-    common = {
-        "prerequisites": [],
-        "outcome": "Observed outcome",
-        "evidence": [evidence],
-        "reasoning": "Directly supported.",
-    }
-    envelope = CVEAttackBehaviorEnvelope.model_validate(
-        {
-            "exploitation_techniques": [
-                {"id": "ET-1", "action": "First method", "enabled_by": [], **common},
-                {"id": "ET-2", "action": "Second method", "enabled_by": [], **common},
-            ],
-            "primary_impacts": [
-                {"id": "PI-1", "action": "Immediate capability", "enabled_by": [], **common}
-            ],
-            "secondary_impacts": [
-                {"id": "SI-1", "action": "Enabled behavior", "enabled_by": ["PI-1"], **common}
-            ],
-        }
-    )
-    assert len(envelope.exploitation_techniques) == 2
-    assert envelope.secondary_impacts[0].enabled_by == ["PI-1"]
+@pytest.mark.parametrize("content", ["", "{", '[]', '{"exploitation_techniques":{}}'])
+@pytest.mark.asyncio
+async def test_invalid_json_or_envelope_is_explicit_failure(content, tmp_path):
+    steps, mappings, chain = sources()
+    ctid, _ = mapper_for(content)
+    with pytest.raises(CTIDMappingError):
+        await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    diagnostic = json.loads(next(tmp_path.glob("*ctid_behavior*.json")).read_text())
+    assert diagnostic["status"] == "validation_failed"
+    assert diagnostic["validation_error"]
 
 
 @pytest.mark.asyncio
-async def test_identifies_all_categories_and_preserves_explicit_nulls() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(behavior_response("The client downloads the malicious archive."))
+async def test_empty_structure_is_valid_and_markdown_json_is_accepted():
+    steps, mappings, chain = sources()
+    data = {"exploitation_techniques": [], "primary_impacts": [], "secondary_impacts": []}
+    ctid, _ = mapper_for(f"```json\n{json.dumps(data)}\n```")
+    assert await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings) == (
+        CVELevelAttackMappings()
     )
-
-    behaviors = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
-
-    assert len(behaviors.exploitation_techniques) == 1
-    assert behaviors.primary_impacts == []
-    assert behaviors.secondary_impacts == []
-    payload = api.chat.completions.create.await_args.kwargs["messages"][1]["content"]
-    assert "CWE-494" not in payload
-    assert "CAPEC-187" not in payload
-    assert "EVIDENCE_CATALOG" in payload
-    decoded_payload = __import__("json").loads(payload)
-    assert "evidence" not in decoded_payload["exploit_steps"][0]
-    assert decoded_payload["exploit_steps"][0]["evidence_ids"]
-    assert api.chat.completions.create.await_args.kwargs["response_format"] == {
-        "type": "json_object"
-    }
-    assert api.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 4096
-    prompt = api.chat.completions.create.await_args.kwargs["messages"][0]["content"]
-    assert "Evidence entries MUST be objects, never strings" in prompt
-    assert "merge them into a single exploitation technique" in prompt
-    assert "unless they independently exploit distinct vulnerabilities" in prompt
-    assert "try to map exploitation techniques, primary impacts, and" in prompt
-    assert "Any item may remain unmapped" in prompt
-    assert '"source_url": "https://..."' in prompt
-    assert '"supporting_text": "exact supplied text"' in prompt
-
-
-def test_parser_accepts_json_markdown_fence_without_retry() -> None:
-    fenced = f"```json\n{behavior_response('The client downloads the malicious archive.')}\n```"
-
-    result = FHGenieCTIDCVEMapper._parse_behaviors(fenced, [step()])
-
-    assert [item.id for item in result.envelope.exploitation_techniques] == ["ET-1"]
-    assert result.errors == []
 
 
 @pytest.mark.asyncio
-async def test_rejects_unprovenanced_evidence_without_erasing_valid_behaviors(
-    tmp_path, monkeypatch
-) -> None:
-    import app.enrichment.ctid_mapper as ctid
-
-    monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
-    valid = behavior_response("The client downloads the malicious archive.")
-    payload = __import__("json").loads(valid)
-    invalid = dict(payload["exploitation_techniques"][0])
-    invalid["id"] = "ET-2"
-    invalid["evidence"] = ["The client downloads the malicious archive."]
-    payload["exploitation_techniques"].append(invalid)
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(__import__("json").dumps(payload))
+async def test_no_chain_skips_ctid_llm():
+    ctid, api = mapper_for({})
+    assert await ctid.map(CVERecord(cve_id="CVE-2026-33557"), [], [], []) == (
+        CVELevelAttackMappings()
     )
-
-    behaviors = await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
-
-    assert [item.id for item in behaviors.exploitation_techniques] == ["ET-1"]
-    diagnostics = [__import__("json").loads(path.read_text()) for path in tmp_path.glob("*.json")]
-    assert all(item["status"] == "partial_validation_failure" for item in diagnostics)
-    assert "Input should be a valid dictionary" in diagnostics[0]["validation_errors"][0]["error"]
-    assert all(item["legitimate_empty_result"] is False for item in diagnostics)
-    assert api.chat.completions.create.await_count == 2
+    api.chat.completions.create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_invalid_behavior_envelope_is_logged_and_not_treated_as_empty(
-    tmp_path, monkeypatch
-) -> None:
-    import app.enrichment.ctid_mapper as ctid
-
-    monkeypatch.setattr(ctid, "CTID_LOG_DIR", tmp_path)
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(return_value=response('{"exploitation_techniques":'))
-
-    with pytest.raises(ctid.CTIDMappingError, match="invalid CTID behavior JSON"):
-        await FHGenieCTIDCVEMapper("test-model", api).identify_behaviors(cve(), [step()])
-
-    diagnostics = list(tmp_path.glob("*.json"))
-    assert len(diagnostics) == 2
-    logged = __import__("json").loads(diagnostics[0].read_text())
-    assert logged["status"] == "validation_failed"
-    assert logged["legitimate_empty_result"] is False
-    assert "invalid CTID behavior JSON" in logged["validation_errors"][0]["error"]
-
-
-@pytest.mark.asyncio
-async def test_maps_categories_without_independent_validation() -> None:
-    item = step()
-    ev_id = evidence_id(str(item.evidence[0].source_url), item.evidence[0].supporting_text)
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=response(behavior_response(item.evidence[0].supporting_text))
-    )
+async def test_ctid_enabled_and_disabled_preserve_identical_attack_outputs(monkeypatch):
+    steps, mappings, chain = sources()
+    cve = CVERecord(cve_id="CVE-2026-33557", description="Existing evidence.")
+    monkeypatch.setattr("app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve))
     graph = MagicMock()
-    graph.attack_candidates = AsyncMock(
-        return_value=[
-            AttackCandidate(
-                mitre_technique_id="T1105",
-                name="Ingress Tool Transfer",
-                description="Transfer files from an external system.",
-                platforms=["Windows"],
-                tactics={"command-and-control": "TA0011"},
-            )
-        ]
-    )
-    graph.official_attack_context = AsyncMock(return_value={})
-    mapper = MagicMock()
-    mapper.map_steps = AsyncMock(
-        return_value=[
-            AttackMapping(
-                step=1,
-                action="The client downloads an attacker-controlled archive",
-                mitre_technique_id="T1105",
-                mitre_tactic_id="TA0011",
-                reasoning="The behavior transfers a file.",
-                confidence=0.8,
-                evidence_ids=[ev_id],
-            )
-        ]
-    )
-
-    mappings = await FHGenieCTIDCVEMapper("test-model", api).map(cve(), [item], graph, mapper)
-
-    assert mappings.exploitation_techniques[0].mitre_technique_id == "T1105"
-    assert mappings.primary_impacts == []
-    graph.attack_candidates.assert_awaited_once()
-    mapper.map_steps.assert_awaited_once()
-    graph.official_attack_context.assert_not_awaited()
-    assert mapper.map_steps.await_args.kwargs == {"schema_only": True}
-    assert mappings.exploitation_techniques[0].validation is None
-
-
-@pytest.mark.asyncio
-async def test_et_pi_and_si_are_sent_through_attack_mapping() -> None:
-    evidence = step().evidence
-    envelope = CVEAttackBehaviorEnvelope(
-        exploitation_techniques=[
-            CVEAttackBehavior(
-                id="ET-1",
-                action="Trigger a stack-based buffer overflow",
-                outcome="Overflow",
-                evidence=evidence,
-                reasoning="Supported.",
-            )
-        ],
-        primary_impacts=[
-            CVEAttackBehavior(
-                id="PI-1",
-                action="Obtain remote code execution",
-                outcome="RCE",
-                enabled_by=["ET-1"],
-                evidence=evidence,
-                reasoning="Supported.",
-            )
-        ],
-        secondary_impacts=[
-            CVEAttackBehavior(
-                id="SI-1",
-                action="Clear forensic logs",
-                outcome="Logs cleared",
-                enabled_by=["PI-1"],
-                evidence=evidence,
-                reasoning="Supported.",
-            )
-        ],
-    )
-    graph = MagicMock()
+    graph.verify_taxonomy = AsyncMock()
     graph.attack_candidates = AsyncMock(return_value=[])
-    graph.official_attack_context = AsyncMock(return_value={})
+    graph.description_attack_candidates = AsyncMock()
+    agent = MagicMock()
+    agent.extract = AsyncMock(return_value=steps)
     attack_mapper = MagicMock()
-    attack_mapper.map_steps = AsyncMock(return_value=[])
-    ctid_mapper = FHGenieCTIDCVEMapper("test-model", MagicMock())
-    ctid_mapper.identify_behaviors = AsyncMock(return_value=envelope)
-
-    mappings = await ctid_mapper.map(cve(), [step()], graph, attack_mapper)
-
-    retrieved_actions = [call.args[0].action for call in graph.attack_candidates.await_args_list]
-    mapped_actions = [call.args[1][0].action for call in attack_mapper.map_steps.await_args_list]
-    assert retrieved_actions == [
-        "Trigger a stack-based buffer overflow",
-        "Obtain remote code execution",
-        "Clear forensic logs",
-    ]
-    assert mapped_actions == retrieved_actions
-    assert mappings.primary_impacts[0].mitre_technique_id is None
-    assert mappings.primary_impacts[0].enabled_by == ["ET-1"]
-    assert mappings.primary_impacts[0].confidence == 0.0
-
-
-def test_cve_2025_0282_regression_shape_excludes_reconnaissance() -> None:
-    result = FHGenieCTIDCVEMapper._parse_behaviors(causal_behavior_payload(), [step()])
-    actions = {
-        stage: [item.action.lower() for item in getattr(result.envelope, stage)]
-        for stage in ("exploitation_techniques", "primary_impacts", "secondary_impacts")
-    }
-
-    assert any(
-        "stack-based buffer overflow" in action for action in actions["exploitation_techniques"]
+    attack_mapper.map_steps = AsyncMock(return_value=mappings)
+    ctid, api = mapper_for(payload(steps, outcome_pi=True))
+    service = CVEAnalysisService(
+        Settings(ctid_only_mode=False, enable_ctid_mapping=False), graph, MagicMock(),
+        agent, attack_mapper, ctid,
     )
-    assert any("remote code execution" in action for action in actions["primary_impacts"])
-    assert actions["secondary_impacts"]
-    assert all("version" not in action for action in actions["exploitation_techniques"])
-    assert (
-        "version detection"
-        in __import__(
-            "app.enrichment.ctid_mapper", fromlist=["CTID_SYSTEM_PROMPT"]
-        ).CTID_SYSTEM_PROMPT
-    )
-
-
-def test_schema_valid_unprovenanced_evidence_and_duplicate_ids_are_preserved() -> None:
-    import json
-
-    payload = json.loads(causal_behavior_payload())
-    behavior = payload["exploitation_techniques"][0]
-    behavior["evidence"][0]["supporting_text"] = "Text absent from the supplied evidence."
-    payload["exploitation_techniques"].append(behavior.copy())
-    result = FHGenieCTIDCVEMapper._parse_behaviors(json.dumps(payload), [step()])
-    assert result.errors == []
-    assert len(result.envelope.exploitation_techniques) == 2
-    assert result.envelope.exploitation_techniques[0].evidence[0].supporting_text == (
-        "Text absent from the supplied evidence."
-    )
+    service._fetch_advisories = AsyncMock(return_value=([MagicMock()], [], []))
+    disabled = await service.analyze(cve.cve_id, description_source="advisories")
+    service.settings.enable_ctid_mapping = True
+    enabled = await service.analyze(cve.cve_id, description_source="advisories")
+    assert enabled.attack_chain == disabled.attack_chain == chain
+    assert enabled.attack_mappings == disabled.attack_mappings == mappings
+    assert enabled.exploit_steps == disabled.exploit_steps == steps
+    assert graph.attack_candidates.await_count == 2 * len(steps)
+    assert attack_mapper.map_steps.await_count == 2
+    assert agent.extract.await_count == 2
+    graph.description_attack_candidates.assert_not_awaited()
+    api.chat.completions.create.assert_awaited_once()
+    assert enabled.cve_level_attack_mappings.primary_impacts[0].mitre_technique_id is None

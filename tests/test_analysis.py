@@ -5,9 +5,8 @@ import pytest
 
 from app.analysis import CVEAnalysisService
 from app.config import Settings
-from app.enrichment.ctid_mapper import CTIDMappingError, CTIDNormalizedSemantics
+from app.enrichment.ctid_mapper import CTIDMappingError
 from app.models import (
-    CVELevelAttackMappings,
     CVERecord,
     ExploitStep,
     SourceAttribution,
@@ -144,13 +143,7 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
     mapper = MagicMock(model="mapper-model")
     mapper.map_steps = AsyncMock()
     ctid_mapper = MagicMock(model="ctid-model")
-    normalized = CTIDNormalizedSemantics(
-        exploitation_behaviors=["Exploit a predictable session identifier"],
-        primary_capabilities=["Gain control of a victim session"],
-        secondary_behaviors=[],
-    )
-    ctid_mapper.normalize_description = AsyncMock(return_value=normalized)
-    ctid_mapper.map_description = AsyncMock(return_value=CVELevelAttackMappings())
+    ctid_mapper.map = AsyncMock()
     service = CVEAnalysisService(
         Settings(ctid_only_mode=True),
         graph,
@@ -162,11 +155,9 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
 
     result = await service.analyze(cve.cve_id)
 
-    ctid_mapper.normalize_description.assert_awaited_once_with(cve)
-    graph.description_attack_candidates.assert_awaited_once_with(
-        cve.cve_id, normalized.model_dump(mode="json")
-    )
-    ctid_mapper.map_description.assert_awaited_once()
+    ctid_mapper.map.assert_not_awaited()
+    graph.description_attack_candidates.assert_not_awaited()
+    assert any("requires an existing attack chain" in warning for warning in result.warnings)
     graph.replace_cve_level_attack_mappings.assert_not_awaited()
     agent.extract.assert_not_awaited()
     graph.attack_candidates.assert_not_awaited()

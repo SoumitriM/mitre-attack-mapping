@@ -24,7 +24,7 @@ from app.enrichment.fh_genie import (
     FHGenieEvidenceAgent,
     normalized_description_evidence,
 )
-from app.graph.repository import GraphRepository, GraphUnavailable
+from app.graph.repository import GraphRepository
 from app.ingestion.description import description_is_substantive
 from app.ingestion.opencve import fetch_opencve_description
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
@@ -232,15 +232,15 @@ class CVEAnalysisService:
                 "CTID mapping skipped",
                 extra={"cve_id": cve.cve_id, "ctid_skipped": True},
             )
-        elif steps and (self.ctid_mapper is None or self.mapper is None):
+        elif steps and self.ctid_mapper is None:
             warnings.append("FH Genie CTID CVE-level mapper is not configured")
             cve_level_mappings = empty_ctid_mappings()
-        elif steps and self.ctid_mapper and self.mapper:
+        elif steps and self.ctid_mapper:
             try:
                 cve_level_mappings = await self.ctid_mapper.map(
-                    cve, steps, self.graph, self.mapper
+                    cve, steps, attack_chain, mappings
                 )
-            except (CTIDMappingError, GraphUnavailable) as exc:
+            except CTIDMappingError as exc:
                 logger.exception(
                     "CVE-level CTID mapping failed",
                     extra={"cve_id": cve.cve_id, "stage": "cve_level_attack_mappings"},
@@ -314,36 +314,13 @@ class CVEAnalysisService:
                 advisory.extraction_status = ExtractionStatus.EXTRACTION_FAILED
 
     async def _analyze_ctid_only(self, cve: CVERecord) -> CVEAnalysis:
-        mappings = empty_ctid_mappings()
-        warnings = list(cve.warnings)
-        if not cve.description:
-            warnings.append("CVE description was unavailable; CTID mapping was skipped")
-        elif self.ctid_mapper is None:
-            raise CTIDMappingError("FH Genie CTID mapper is not configured")
-        else:
-            description = normalized_description_evidence(cve)
-            source_url = (
-                description.source_url
-                if description
-                else f"https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
-            )
-            try:
-                normalized = await self.ctid_mapper.normalize_description(cve)
-                candidates = await self.graph.description_attack_candidates(
-                    cve.cve_id, normalized.model_dump(mode="json")
-                )
-                mappings = await self.ctid_mapper.map_description(
-                    cve, normalized, candidates, source_url=source_url
-                )
-            except (CTIDMappingError, GraphUnavailable):
-                logger.exception("CTID-only mapping failed", extra={"cve_id": cve.cve_id})
-                raise
+        """No mappings can be reused when legacy CTID-only mode omits the chain."""
         return CVEAnalysis(
             cve=cve,
-            exploit_steps=[],
-            attack_mappings=[],
-            attack_chain=[],
-            cve_level_attack_mappings=mappings,
-            subgraph=EvidenceSubgraph(),
-            warnings=list(dict.fromkeys(warnings)),
+            cve_level_attack_mappings=empty_ctid_mappings(),
+            warnings=list(dict.fromkeys([
+                *cve.warnings,
+                "CTID generation requires an existing attack chain; legacy CTID-only mode "
+                "has no source behaviors or mappings. Set CTID_ONLY_MODE=false.",
+            ])),
         )
