@@ -109,6 +109,23 @@ and confidence thresholds are not checked, and no independent validator is calle
 behaviors and links are preserved as returned. `processing_status` distinguishes retrieval and
 mapping failures. This stage does not modify `attack_chain` or its deterministic mapping checks.
 
+To compare description-only extraction with the advisory workflow, use:
+
+```bash
+python -m app.cli analyze CVE-2024-3400 --description-source opencve \
+  --full --output output/opencve-analysis.json
+```
+
+The alternative `CVEAnalysisService.analyze_opencve` fetches the public OpenCVE
+page once and uses only its Description section as extraction evidence. It skips
+advisory fetching and compression, then uses the same ATT&CK and CTID pipeline.
+Authoritative NVD/CVE List metadata still supplies CVSS and platform context.
+Description provenance and exact evidence excerpts point to OpenCVE. Fetch or
+page-format failures are explicit; this path does not fall back to advisories.
+CTID-only mode must be disabled. The CLI otherwise retains the normal pipeline
+retry policy; the saved comparison runner explicitly disables retries.
+Short descriptions may omit exploit details supplied by advisories.
+
 ## Quality checks
 
 ```bash

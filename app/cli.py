@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import httpx
 import typer
@@ -27,7 +27,9 @@ def root() -> None:
     """Extract evidence-grounded exploit steps from CVE advisories."""
 
 
-async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
+async def _analyze_many(
+    cve_ids: list[str], description_source: Literal["advisories", "opencve"] = "advisories"
+) -> list[dict[str, object]]:
     settings = get_settings()
     if settings.neo4j_password is None:
         raise RuntimeError("NEO4J_PASSWORD is required")
@@ -83,7 +85,10 @@ async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
             service = CVEAnalysisService(
                 settings, graph, client, agent, mapper, ctid_mapper
             )
-            results = [await service.analyze(cve_id) for cve_id in cve_ids]
+            results = [
+                await service.analyze(cve_id, description_source=description_source)
+                for cve_id in cve_ids
+            ]
         return [result.model_dump(mode="json") for result in results]
     finally:
         await driver.close()
@@ -122,6 +127,9 @@ def analyze(
         Path | None,
         typer.Option(help="Write pretty-printed batch JSON to this file"),
     ] = None,
+    description_source: Annotated[
+        str, typer.Option(help="Evidence source: advisories or opencve (no compression)")
+    ] = "advisories",
     full: Annotated[
         bool,
         typer.Option(help="Include advisories, evidence, and internal analysis fields"),
@@ -129,7 +137,11 @@ def analyze(
 ) -> None:
     """Analyze one or more CVEs and print them as one JSON array."""
     try:
-        records = asyncio.run(_analyze_many(cve_ids))
+        if description_source not in {"advisories", "opencve"}:
+            raise ValueError("description-source must be advisories or opencve")
+        records = asyncio.run(
+            _analyze_many(cve_ids, cast(Literal["advisories", "opencve"], description_source))
+        )
     except (ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc

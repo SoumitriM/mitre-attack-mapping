@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 
@@ -19,11 +21,13 @@ from app.enrichment.ctid_mapper import (
     empty_ctid_mappings,
 )
 from app.enrichment.fh_genie import (
+    DescriptionEvidence,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
     normalized_description_evidence,
 )
 from app.graph.repository import GraphRepository, GraphUnavailable
+from app.ingestion.opencve import fetch_opencve_description
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
     AdvisoryResult,
@@ -35,6 +39,7 @@ from app.models import (
     EvidenceSubgraph,
     ExploitStep,
     ExtractionStatus,
+    SourceAttribution,
     ValidatedAttackStep,
     ValidationChecks,
     ValidationDetails,
@@ -103,68 +108,96 @@ class CVEAnalysisService:
         self.mapper = mapper
         self.ctid_mapper = ctid_mapper
 
-    async def analyze(self, cve_id: str) -> CVEAnalysis:
+    async def analyze_opencve(self, cve_id: str) -> CVEAnalysis:
+        """Use only OpenCVE description evidence; skip advisories and compression."""
+        return await self.analyze(cve_id, description_source="opencve")
+
+    async def analyze(
+        self, cve_id: str, *, description_source: Literal["advisories", "opencve"] = "advisories"
+    ) -> CVEAnalysis:
+        if description_source == "opencve" and self.settings.ctid_only_mode:
+            raise ValueError("OpenCVE extraction requires ctid_only_mode=False")
         normalized_id = normalize_cve_id(cve_id)
         await self.graph.verify_taxonomy()
         cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
         if self.settings.ctid_only_mode:
             return await self._analyze_ctid_only(cve)
-        selected = sorted(
-            select_references(cve.references, self.settings.advisory_allowed_domains),
-            key=advisory_priority,
-        )
-        advisory_client = AdvisoryClient(self.client, max_bytes=self.settings.advisory_max_bytes)
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
-        description = normalized_description_evidence(cve)
-        description_result = (
-            DescriptionEvidenceResult(
+        description: DescriptionEvidence | None
+        description_result: DescriptionEvidenceResult | None
+        if description_source == "opencve":
+            description = await fetch_opencve_description(cve.cve_id, self.client)
+            cve = cve.model_copy(deep=True)
+            cve.description = description.text
+            cve.field_provenance["description"] = ["OpenCVE"]
+            cve.sources.append(
+                SourceAttribution(
+                    name="OpenCVE", url=description.source_url, retrieved_at=datetime.now(UTC)
+                )
+            )
+            description_result = DescriptionEvidenceResult(
                 source_name=description.source_name,
                 source_url=description.source_url,
                 extraction_status=ExtractionStatus.COMPLETED,
             )
-            if description
-            else None
-        )
+        else:
+            selected = sorted(
+                select_references(cve.references, self.settings.advisory_allowed_domains),
+                key=advisory_priority,
+            )
+            advisory_client = AdvisoryClient(
+                self.client, max_bytes=self.settings.advisory_max_bytes
+            )
+            description = normalized_description_evidence(cve)
+            description_result = (
+                DescriptionEvidenceResult(
+                    source_name=description.source_name,
+                    source_url=description.source_url,
+                    extraction_status=ExtractionStatus.COMPLETED,
+                )
+                if description
+                else None
+            )
 
-        async def fetch_one(item: SelectedReference) -> FetchedAdvisory | Exception:
-            try:
-                return await advisory_client.fetch(item)
-            except Exception as exc:
-                return exc
+            async def fetch_one(item: SelectedReference) -> FetchedAdvisory | Exception:
+                try:
+                    return await advisory_client.fetch(item)
+                except Exception as exc:
+                    return exc
 
-        for selected_item in selected:
-            outcome = await fetch_one(selected_item)
-            if isinstance(outcome, FetchedAdvisory):
-                fetched.append(outcome)
-                results.append(
-                    AdvisoryResult(
-                        url=outcome.selected.reference.url,
-                        reference_tags=outcome.selected.reference.tags,
-                        selection_reason=outcome.selected.reason,
-                        retrieved_at=outcome.retrieved_at,
-                        checksum=outcome.checksum,
-                        extraction_status=ExtractionStatus.COMPLETED,
+            for selected_item in selected:
+                outcome = await fetch_one(selected_item)
+                if isinstance(outcome, FetchedAdvisory):
+                    fetched.append(outcome)
+                    results.append(
+                        AdvisoryResult(
+                            url=outcome.selected.reference.url,
+                            reference_tags=outcome.selected.reference.tags,
+                            selection_reason=outcome.selected.reason,
+                            retrieved_at=outcome.retrieved_at,
+                            checksum=outcome.checksum,
+                            extraction_status=ExtractionStatus.COMPLETED,
+                        )
                     )
-                )
-                if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
-                    break
-            else:
-                status = (
-                    ExtractionStatus.UNSUPPORTED_CONTENT
-                    if isinstance(outcome, UnsupportedAdvisoryContent)
-                    else ExtractionStatus.FETCH_FAILED
-                )
-                results.append(
-                    AdvisoryResult(
-                        url=selected_item.reference.url,
-                        reference_tags=selected_item.reference.tags,
-                        selection_reason=selected_item.reason,
-                        extraction_status=status,
+                    if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
+                        break
+                else:
+                    status = (
+                        ExtractionStatus.UNSUPPORTED_CONTENT
+                        if isinstance(outcome, UnsupportedAdvisoryContent)
+                        else ExtractionStatus.FETCH_FAILED
                     )
-                )
-                warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
+                    results.append(
+                        AdvisoryResult(
+                            url=selected_item.reference.url,
+                            reference_tags=selected_item.reference.tags,
+                            selection_reason=selected_item.reason,
+                            extraction_status=status,
+                        )
+                    )
+                    warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
 
         has_evidence = bool(fetched or description)
         steps = []
