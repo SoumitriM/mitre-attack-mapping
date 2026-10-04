@@ -202,7 +202,7 @@ async def test_batch_runner_releases_neo4j_and_model_clients(monkeypatch, graph_
         cve={"cve_id": cve}
     )))
     monkeypatch.setattr("app.api.routes.get_settings", lambda: Settings(
-        neo4j_password="test", ctid_only_mode=False, enable_ctid_mapping=False,
+        neo4j_password="test", enable_ctid_mapping=False,
     ))
     monkeypatch.setattr("app.api.routes.AsyncGraphDatabase.driver", lambda *args, **kwargs: driver)
     monkeypatch.setattr("app.api.routes.FHGenieEvidenceAgent", lambda settings: agent)
@@ -219,3 +219,30 @@ async def test_batch_runner_releases_neo4j_and_model_clients(monkeypatch, graph_
                    for call in service.analyze.await_args_list)
     driver.close.assert_awaited_once()
     inference.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_default_api_returns_saved_compact_response_in_results(monkeypatch):
+    import json
+    from pathlib import Path
+
+    expected = json.loads((Path(__file__).parent / 'fixtures/compact-results.json').read_text())
+    runner = AsyncMock(return_value=expected)
+    monkeypatch.setattr('app.main.run_analysis_batch', runner)
+    monkeypatch.setattr('app.api.routes.get_settings', lambda: Settings(neo4j_password='test'))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client,
+    ):
+        ids = [record['cve_id'] for record in expected]
+        submitted = await client.post('/api/cve-analysis', json={'cve_ids': ids})
+        assert submitted.status_code == 202
+        await asyncio.sleep(0)
+        response = await client.get(submitted.json()['poll_url'])
+        assert response.status_code == 200
+        assert response.json()['status'] == 'completed'
+        assert response.json()['results'] == expected
+        runner.assert_awaited_once_with(ids, True, 'auto')
+        repeated = await client.get(submitted.json()['poll_url'])
+        assert repeated.json() == response.json()
+        assert runner.await_count == 1

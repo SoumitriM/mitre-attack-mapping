@@ -114,13 +114,9 @@ class CVEAnalysisService:
     async def analyze(
         self, cve_id: str, *, description_source: Literal["auto", "advisories", "opencve"] = "auto"
     ) -> CVEAnalysis:
-        if description_source == "opencve" and self.settings.ctid_only_mode:
-            raise ValueError("OpenCVE extraction requires ctid_only_mode=False")
         normalized_id = normalize_cve_id(cve_id)
         await self.graph.verify_taxonomy()
         cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
-        if self.settings.ctid_only_mode:
-            return await self._analyze_ctid_only(cve)
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
@@ -312,15 +308,3 @@ class CVEAnalysisService:
         for advisory in advisories:
             if advisory.extraction_status == ExtractionStatus.COMPLETED:
                 advisory.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-
-    async def _analyze_ctid_only(self, cve: CVERecord) -> CVEAnalysis:
-        """No mappings can be reused when legacy CTID-only mode omits the chain."""
-        return CVEAnalysis(
-            cve=cve,
-            cve_level_attack_mappings=empty_ctid_mappings(),
-            warnings=list(dict.fromkeys([
-                *cve.warnings,
-                "CTID generation requires an existing attack chain; legacy CTID-only mode "
-                "has no source behaviors or mappings. Set CTID_ONLY_MODE=false.",
-            ])),
-        )

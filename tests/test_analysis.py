@@ -54,7 +54,7 @@ async def test_ctid_failure_is_explicitly_logged_and_reported(caplog, monkeypatc
     agent = MagicMock(model="extractor-model")
     agent.extract = AsyncMock(return_value=[step()])
     service = CVEAnalysisService(
-        Settings(enable_ctid_mapping=True, ctid_only_mode=False),
+        Settings(enable_ctid_mapping=True),
         graph,
         MagicMock(),
         agent,
@@ -101,7 +101,7 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
     agent = MagicMock(model="extractor-model")
     agent.extract = AsyncMock(return_value=[step()])
     service = CVEAnalysisService(
-        Settings(enable_ctid_mapping=False, ctid_only_mode=False),
+        Settings(enable_ctid_mapping=False),
         graph,
         MagicMock(),
         agent,
@@ -122,45 +122,3 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
     graph.replace_cve_level_attack_mappings.assert_not_awaited()
     assert result.cve_level_attack_mappings.exploitation_techniques == []
     assert "CTID mapping skipped" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> None:
-    cve = CVERecord(
-        cve_id="CVE-2026-9323",
-        description="A predictable session identifier permits session access.",
-    )
-    monkeypatch.setattr("app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve))
-    graph = MagicMock()
-    graph.verify_taxonomy = AsyncMock()
-    graph.description_attack_candidates = AsyncMock(
-        return_value={"exploitation": [], "primary_impact": [], "secondary_impact": []}
-    )
-    graph.replace_cve_level_attack_mappings = AsyncMock()
-    graph.attack_candidates = AsyncMock()
-    agent = MagicMock(model="extractor-model")
-    agent.extract = AsyncMock()
-    mapper = MagicMock(model="mapper-model")
-    mapper.map_steps = AsyncMock()
-    ctid_mapper = MagicMock(model="ctid-model")
-    ctid_mapper.map = AsyncMock()
-    service = CVEAnalysisService(
-        Settings(ctid_only_mode=True),
-        graph,
-        MagicMock(),
-        agent,
-        mapper,
-        ctid_mapper,
-    )
-
-    result = await service.analyze(cve.cve_id)
-
-    ctid_mapper.map.assert_not_awaited()
-    graph.description_attack_candidates.assert_not_awaited()
-    assert any("requires an existing attack chain" in warning for warning in result.warnings)
-    graph.replace_cve_level_attack_mappings.assert_not_awaited()
-    agent.extract.assert_not_awaited()
-    graph.attack_candidates.assert_not_awaited()
-    mapper.map_steps.assert_not_awaited()
-    assert result.exploit_steps == []
-    assert result.attack_chain == []

@@ -56,7 +56,7 @@ async def test_opencve_analysis_skips_advisories_and_compression(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, text=html, headers={"content-type": "text/html"})
     )) as client:
-        service = CVEAnalysisService(Settings(ctid_only_mode=False), graph, client, agent)
+        service = CVEAnalysisService(Settings(), graph, client, agent)
         result = await service.analyze_opencve(cve.cve_id)
     assert result.advisories == []
     assert result.description_evidence.source_name == "OpenCVE"

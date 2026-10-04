@@ -62,7 +62,7 @@ def service(monkeypatch):
         "evidence": [{"source_url": "https://app.opencve.io/cve/CVE-2024-21887",
                       "supporting_text": RICH}],
     })])
-    svc = CVEAnalysisService(Settings(ctid_only_mode=False, enable_ctid_mapping=False),
+    svc = CVEAnalysisService(Settings(enable_ctid_mapping=False),
                              graph, MagicMock(), agent)
     svc._fetch_advisories = AsyncMock(return_value=([], [], []))
     return svc

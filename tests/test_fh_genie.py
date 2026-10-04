@@ -72,10 +72,6 @@ def test_fh_genie_is_the_default_even_with_an_openrouter_key() -> None:
     assert FHGenieEvidenceAgent(configured, MagicMock()).provider == "fh_genie"
 
 
-def test_full_attack_chain_analysis_is_the_default() -> None:
-    assert Settings(_env_file=None).ctid_only_mode is False
-
-
 @pytest.mark.asyncio
 async def test_claude_extraction_is_one_call_and_hydrates_internal_evidence() -> None:
     api = MagicMock()

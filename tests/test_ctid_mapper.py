@@ -255,14 +255,13 @@ async def test_ctid_enabled_and_disabled_preserve_identical_attack_outputs(monke
     graph = MagicMock()
     graph.verify_taxonomy = AsyncMock()
     graph.attack_candidates = AsyncMock(return_value=[])
-    graph.description_attack_candidates = AsyncMock()
     agent = MagicMock()
     agent.extract = AsyncMock(return_value=steps)
     attack_mapper = MagicMock()
     attack_mapper.map_steps = AsyncMock(return_value=mappings)
     ctid, api = mapper_for(payload(steps, outcome_pi=True))
     service = CVEAnalysisService(
-        Settings(ctid_only_mode=False, enable_ctid_mapping=False), graph, MagicMock(),
+        Settings(enable_ctid_mapping=False), graph, MagicMock(),
         agent, attack_mapper, ctid,
     )
     service._fetch_advisories = AsyncMock(return_value=([MagicMock()], [], []))
@@ -275,7 +274,6 @@ async def test_ctid_enabled_and_disabled_preserve_identical_attack_outputs(monke
     assert graph.attack_candidates.await_count == 2 * len(steps)
     assert attack_mapper.map_steps.await_count == 2
     assert agent.extract.await_count == 2
-    graph.description_attack_candidates.assert_not_awaited()
     api.chat.completions.create.assert_awaited_once()
     assert enabled.cve_level_attack_mappings.primary_impacts[0].mitre_technique_id is None
 

@@ -44,30 +44,14 @@ async def _analyze_many(
         ctid_mapper: FHGenieCTIDCVEMapper | None
         downstream_client: AsyncCompatibleClient | None
         try:
-            if settings.ctid_only_mode:
-                if not (
-                    settings.fh_genie_key and settings.fh_genie_base_url and settings.fh_genie_model
-                ):
-                    raise ValueError("FH Genie is required for CTID-only mode")
-                downstream_client = cast(
-                    AsyncCompatibleClient,
-                    AsyncOpenAI(
-                        api_key=settings.fh_genie_key.get_secret_value(),
-                        base_url=settings.fh_genie_base_url,
-                    ),
-                )
-                agent = None
-                mapper = None
-                ctid_mapper = FHGenieCTIDCVEMapper(settings.fh_genie_model, downstream_client)
-            else:
-                agent = FHGenieEvidenceAgent(settings)
-                downstream_client = agent.downstream_client
-                mapper = FHGenieAttackMapper(settings, downstream_client)
-                ctid_mapper = (
-                    FHGenieCTIDCVEMapper(mapper.model, downstream_client)
-                    if settings.enable_ctid_mapping
-                    else None
-                )
+            agent = FHGenieEvidenceAgent(settings)
+            downstream_client = agent.downstream_client
+            mapper = FHGenieAttackMapper(settings, downstream_client)
+            ctid_mapper = (
+                FHGenieCTIDCVEMapper(mapper.model, downstream_client)
+                if settings.enable_ctid_mapping
+                else None
+            )
         except ValueError:
             agent = None
             mapper = None

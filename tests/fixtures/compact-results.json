@@ -1,0 +1,138 @@
+[
+  {
+    "cve_id": "CVE-2026-33557",
+    "attack_chain": [
+      {
+        "step": 1,
+        "action": "Craft a JWT token with an arbitrary issuer and set preferred_username to a target user account",
+        "technique_id": "T1606",
+        "tactic_id": "TA0006",
+        "technique_name": "Forge Web Credentials",
+        "tactic_name": "Credential Access",
+        "confidence": 0.95,
+        "mapped": true
+      },
+      {
+        "step": 2,
+        "action": "Authenticate to the Kafka broker using SASL OAuthBearer mechanism with the crafted JWT token",
+        "technique_id": "T1606",
+        "tactic_id": "TA0006",
+        "technique_name": "Forge Web Credentials",
+        "tactic_name": "Credential Access",
+        "confidence": 0.85,
+        "mapped": true
+      },
+      {
+        "step": 3,
+        "action": "Gain unauthorized access to Kafka as the specified user due to missing JWT signature, issuer, and audience validation",
+        "technique_id": "T1606",
+        "tactic_id": "TA0006",
+        "technique_name": "Forge Web Credentials",
+        "tactic_name": "Credential Access",
+        "confidence": 0.95,
+        "mapped": true
+      }
+    ],
+    "ctid_map": {
+      "exploitation_techniques": [
+        {
+          "id": "ET-1",
+          "action": "Craft JWT token with arbitrary issuer and preferred_username claim, then authenticate to Kafka broker via SASL OAuthBearer",
+          "technique_id": "T1606",
+          "tactic_id": "TA0006",
+          "technique_name": "Forge Web Credentials",
+          "tactic_name": "Credential Access",
+          "status": "completed"
+        }
+      ],
+      "primary_impacts": [
+        {
+          "id": "PI-1",
+          "action": "Gain unauthorized access to Kafka broker as the specified user",
+          "technique_id": null,
+          "tactic_id": null,
+          "technique_name": null,
+          "tactic_name": null,
+          "status": "completed",
+          "enabled_by": [
+            "ET-1"
+          ]
+        }
+      ],
+      "secondary_impacts": []
+    }
+  },
+  {
+    "cve_id": "CVE-2026-57112",
+    "attack_chain": [
+      {
+        "step": 1,
+        "action": "Perform DNS rebinding attack to target a reachable local or internal SSE server at the /sse or /messages/ endpoints",
+        "technique_id": null,
+        "tactic_id": null,
+        "technique_name": null,
+        "tactic_name": null,
+        "confidence": 0.0,
+        "mapped": false
+      },
+      {
+        "step": 2,
+        "action": "Send HTTP requests with attacker-controlled Host and Origin headers to the vulnerable SSE endpoints",
+        "technique_id": "T1071.001",
+        "tactic_id": "TA0011",
+        "technique_name": "Web Protocols",
+        "tactic_name": "Command and Control",
+        "confidence": 0.55,
+        "mapped": true
+      },
+      {
+        "step": 3,
+        "action": "Enumerate registered tools available on the SSE server",
+        "technique_id": "T1046",
+        "tactic_id": "TA0007",
+        "technique_name": "Network Service Discovery",
+        "tactic_name": "Discovery",
+        "confidence": 0.55,
+        "mapped": true
+      },
+      {
+        "step": 4,
+        "action": "Invoke enumerated tools with the server user's privileges via the SSE endpoint",
+        "technique_id": null,
+        "tactic_id": null,
+        "technique_name": null,
+        "tactic_name": null,
+        "confidence": 0.0,
+        "mapped": false
+      }
+    ],
+    "ctid_map": {
+      "exploitation_techniques": [
+        {
+          "id": "ET-1",
+          "action": "DNS rebinding attack to target internal SSE server and send HTTP requests with attacker-controlled Host/Origin headers to enumerate and invoke registered tools with server user privileges",
+          "technique_id": null,
+          "tactic_id": null,
+          "technique_name": null,
+          "tactic_name": null,
+          "status": "completed"
+        }
+      ],
+      "primary_impacts": [
+        {
+          "id": "PI-1",
+          "action": "Unauthorized tool invocation with server user privileges",
+          "technique_id": null,
+          "tactic_id": null,
+          "technique_name": null,
+          "tactic_name": null,
+          "status": "completed",
+          "enabled_by": [
+            "ET-1"
+          ]
+        }
+      ],
+      "secondary_impacts": []
+    }
+  }
+]

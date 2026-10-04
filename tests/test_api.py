@@ -2,7 +2,7 @@ from inspect import signature
 
 from fastapi.testclient import TestClient
 
-from app.api.routes import AnalyzeRequest, analyze, compact_analysis_view, ctid_only_view
+from app.api.routes import AnalyzeRequest, analyze, compact_analysis_view
 from app.main import app
 from app.models import CVEAnalysis
 
@@ -146,5 +146,4 @@ def test_compact_analysis_view_contains_only_mapping_views() -> None:
     ]
     assert compact["ctid_map"]["exploitation_techniques"][0]["technique_id"] == "T1203"
     assert compact["ctid_map"]["primary_impacts"][0]["enabled_by"] == ["ET-1"]
-    assert set(ctid_only_view(result).model_dump(mode="json")) == {"ctid_map"}
     assert "warnings" not in compact

@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     analysis_job_concurrency: int = Field(default=2, ge=1)
     mapping_min_confidence: float = Field(default=0.50, ge=0, le=1)
     enable_ctid_mapping: bool = True
-    ctid_only_mode: bool = False
     advisory_allowed_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["offseq.com"]
     )

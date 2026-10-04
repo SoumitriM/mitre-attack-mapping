@@ -144,28 +144,6 @@ class MappingProcessingStatus(StrEnum):
     VALIDATION_FAILED = "validation_failed"
 
 
-class CVEAttackBehavior(BaseModel):
-    """One evidence-bounded CTID methodology category before ATT&CK mapping."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str = Field(pattern=r"^(ET|PI|SI)-[1-9][0-9]*$")
-    action: str = Field(min_length=1)
-    prerequisites: list[str] = Field(default_factory=list)
-    outcome: str = Field(min_length=1)
-    enabled_by: list[str] = Field(default_factory=list)
-    evidence: list[StepEvidence] = Field(min_length=1)
-    reasoning: str = Field(min_length=1)
-
-
-class CVEAttackBehaviorEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    exploitation_techniques: list[CVEAttackBehavior] = Field(default_factory=list)
-    primary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
-    secondary_impacts: list[CVEAttackBehavior] = Field(default_factory=list)
-
-
 class ValidationStatus(StrEnum):
     VALIDATED = "validated"
     MAPPED = "mapped"

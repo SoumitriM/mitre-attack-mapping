@@ -71,10 +71,6 @@ class CompactCVEAnalysis(BaseModel):
     ctid_map: CompactCTIDMap
 
 
-class CTIDOnlyAnalysis(BaseModel):
-    ctid_map: CompactCTIDMap
-
-
 def compact_ctid_map(result: CVEAnalysis) -> CompactCTIDMap:
     def ctid_item(item: CVELevelAttackMapping, *, linked: bool) -> CompactCTIDTechnique:
         values = {
@@ -121,10 +117,6 @@ def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
     )
 
 
-def ctid_only_view(result: CVEAnalysis) -> CTIDOnlyAnalysis:
-    return CTIDOnlyAnalysis(ctid_map=compact_ctid_map(result))
-
-
 class AnalysisJobError(BaseModel):
     code: int
     message: str
@@ -140,7 +132,7 @@ class CompletedAnalysisJob(BaseModel):
     job_id: str
     status: Literal["completed"] = "completed"
     poll_url: str
-    results: list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis]
+    results: list[CVEAnalysis | CompactCVEAnalysis]
 
 
 class FailedAnalysisJob(BaseModel):
@@ -180,10 +172,6 @@ async def analyze(
     settings = get_settings()
     if settings.neo4j_password is None:
         raise HTTPException(status_code=503, detail="Neo4j is not configured")
-    if settings.ctid_only_mode and request.description_source != "auto":
-        raise HTTPException(
-            status_code=422, detail="CTID-only mode requires description_source=auto"
-        )
     try:
         cve_ids = [normalize_cve_id(cve_id) for cve_id in request.cve_ids]
     except InvalidCVEID as exc:
@@ -228,34 +216,17 @@ async def run_analysis_batch(
         ctid_mapper: FHGenieCTIDCVEMapper | None
         downstream_client: AsyncCompatibleClient | None
         try:
-            if settings.ctid_only_mode:
-                if not (
-                    settings.fh_genie_key and settings.fh_genie_base_url and settings.fh_genie_model
-                ):
-                    raise ValueError("FH Genie is required for CTID-only mode")
-                downstream_client = cast(
-                    AsyncCompatibleClient,
-                    AsyncOpenAI(
-                        api_key=settings.fh_genie_key.get_secret_value(),
-                        base_url=settings.fh_genie_base_url,
-                    ),
-                )
-                owned_clients = [cast(AsyncOpenAI, downstream_client)]
-                agent = None
-                mapper = None
-                ctid_mapper = FHGenieCTIDCVEMapper(settings.fh_genie_model, downstream_client)
-            else:
-                agent = FHGenieEvidenceAgent(settings)
-                downstream_client = agent.downstream_client
-                owned_clients = [
-                    cast(AsyncOpenAI, agent.client), cast(AsyncOpenAI, downstream_client)
-                ]
-                mapper = FHGenieAttackMapper(settings, downstream_client)
-                ctid_mapper = (
-                    FHGenieCTIDCVEMapper(mapper.model, downstream_client)
-                    if settings.enable_ctid_mapping
-                    else None
-                )
+            agent = FHGenieEvidenceAgent(settings)
+            downstream_client = agent.downstream_client
+            owned_clients = [
+                cast(AsyncOpenAI, agent.client), cast(AsyncOpenAI, downstream_client)
+            ]
+            mapper = FHGenieAttackMapper(settings, downstream_client)
+            ctid_mapper = (
+                FHGenieCTIDCVEMapper(mapper.model, downstream_client)
+                if settings.enable_ctid_mapping
+                else None
+            )
         except ValueError:
             agent = None
             mapper = None
@@ -279,8 +250,6 @@ async def run_analysis_batch(
                 for cve_id in cve_ids
             ]
             await resolve_attack_names(results, graph)
-            if settings.ctid_only_mode:
-                return [ctid_only_view(result).model_dump(mode="json") for result in results]
             if compact:
                 return [compact_analysis_view(result).model_dump(mode="json") for result in results]
             return [result.model_dump(mode="json") for result in results]
