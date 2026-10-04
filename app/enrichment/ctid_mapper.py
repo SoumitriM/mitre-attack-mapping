@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.enrichment.attack_mapper import FHGenieAttackMapper, evidence_id
 from app.enrichment.fh_genie import AsyncCompatibleClient
 from app.enrichment.model_usage import save_model_usage
-from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository
 from app.models import (
     AttackCandidate,
@@ -875,7 +874,6 @@ class FHGenieCTIDCVEMapper:
         steps: list[ExploitStep],
         graph: GraphRepository,
         mapper: FHGenieAttackMapper,
-        validator: FHGenieValidationAgent | None = None,
     ) -> CVELevelAttackMappings:
         envelope = await self.identify_behaviors(
             cve,

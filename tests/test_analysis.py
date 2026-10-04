@@ -44,16 +44,12 @@ async def test_ctid_failure_is_explicitly_logged_and_reported(caplog, monkeypatc
         ],
         field_provenance={"description": ["NVD"]},
     )
-    monkeypatch.setattr(
-        "app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve)
-    )
+    monkeypatch.setattr("app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve))
     graph = MagicMock()
     graph.verify_taxonomy = AsyncMock()
     graph.attack_candidates = AsyncMock(return_value=[])
     mapper = MagicMock(model="mapper-model")
     mapper.map_steps = AsyncMock(return_value=[])
-    validator = MagicMock(model="validator-model")
-    validator.validate = AsyncMock()
     ctid_mapper = MagicMock(model="ctid-model")
     ctid_mapper.map = AsyncMock(side_effect=CTIDMappingError("contract mismatch"))
     agent = MagicMock(model="extractor-model")
@@ -64,7 +60,6 @@ async def test_ctid_failure_is_explicitly_logged_and_reported(caplog, monkeypatc
         MagicMock(),
         agent,
         mapper,
-        validator,
         ctid_mapper,
     )
 
@@ -74,7 +69,6 @@ async def test_ctid_failure_is_explicitly_logged_and_reported(caplog, monkeypatc
     assert result.cve_level_attack_mappings.exploitation_techniques == []
     assert "CVE-level CTID mapping failed: contract mismatch" in result.warnings
     assert "CVE-level CTID mapping failed" in caplog.text
-    validator.validate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -91,9 +85,7 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
         ],
         field_provenance={"description": ["NVD"]},
     )
-    monkeypatch.setattr(
-        "app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve)
-    )
+    monkeypatch.setattr("app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve))
     graph = MagicMock()
     graph.verify_taxonomy = AsyncMock()
     graph.cached_cve = AsyncMock()
@@ -105,8 +97,6 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
     graph.replace_cve_level_attack_mappings = AsyncMock()
     mapper = MagicMock(model="mapper-model")
     mapper.map_steps = AsyncMock(return_value=[])
-    validator = MagicMock(model="validator-model")
-    validator.validate = AsyncMock()
     ctid_mapper = MagicMock(model="ctid-model")
     ctid_mapper.map = AsyncMock()
     agent = MagicMock(model="extractor-model")
@@ -117,7 +107,6 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
         MagicMock(),
         agent,
         mapper,
-        validator,
         ctid_mapper,
     )
 
@@ -134,7 +123,6 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
     graph.replace_cve_level_attack_mappings.assert_not_awaited()
     assert result.cve_level_attack_mappings.exploitation_techniques == []
     assert "CTID mapping skipped" in caplog.text
-    validator.validate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -143,9 +131,7 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
         cve_id="CVE-2026-9323",
         description="A predictable session identifier permits session access.",
     )
-    monkeypatch.setattr(
-        "app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve)
-    )
+    monkeypatch.setattr("app.analysis.CVEIngestionService.analyze", AsyncMock(return_value=cve))
     graph = MagicMock()
     graph.verify_taxonomy = AsyncMock()
     graph.description_attack_candidates = AsyncMock(
@@ -157,8 +143,6 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
     agent.extract = AsyncMock()
     mapper = MagicMock(model="mapper-model")
     mapper.map_steps = AsyncMock()
-    validator = MagicMock(model="validator-model")
-    validator.validate = AsyncMock()
     ctid_mapper = MagicMock(model="ctid-model")
     normalized = CTIDNormalizedSemantics(
         exploitation_behaviors=["Exploit a predictable session identifier"],
@@ -173,7 +157,6 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
         MagicMock(),
         agent,
         mapper,
-        validator,
         ctid_mapper,
     )
 
@@ -188,6 +171,5 @@ async def test_ctid_only_mode_bypasses_detailed_attack_chain(monkeypatch) -> Non
     agent.extract.assert_not_awaited()
     graph.attack_candidates.assert_not_awaited()
     mapper.map_steps.assert_not_awaited()
-    validator.validate.assert_not_awaited()
     assert result.exploit_steps == []
     assert result.attack_chain == []

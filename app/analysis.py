@@ -23,7 +23,6 @@ from app.enrichment.fh_genie import (
     FHGenieEvidenceAgent,
     normalized_description_evidence,
 )
-from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
@@ -95,7 +94,6 @@ class CVEAnalysisService:
         client: httpx.AsyncClient,
         agent: FHGenieEvidenceAgent | None = None,
         mapper: FHGenieAttackMapper | None = None,
-        validator: FHGenieValidationAgent | None = None,
         ctid_mapper: FHGenieCTIDCVEMapper | None = None,
     ) -> None:
         self.settings = settings
@@ -103,7 +101,6 @@ class CVEAnalysisService:
         self.client = client
         self.agent = agent
         self.mapper = mapper
-        self.validator = validator
         self.ctid_mapper = ctid_mapper
 
     async def analyze(self, cve_id: str) -> CVEAnalysis:
@@ -235,7 +232,7 @@ class CVEAnalysisService:
         elif steps and self.ctid_mapper and self.mapper:
             try:
                 cve_level_mappings = await self.ctid_mapper.map(
-                    cve, steps, self.graph, self.mapper, self.validator
+                    cve, steps, self.graph, self.mapper
                 )
             except (CTIDMappingError, GraphUnavailable) as exc:
                 logger.exception(

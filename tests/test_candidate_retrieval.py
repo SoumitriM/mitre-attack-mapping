@@ -19,7 +19,6 @@ from app.enrichment.candidate_retrieval import (
     combine_candidates,
     compact_description,
     embedding_cache_key,
-    normalized_behavior_query,
     rerank_candidates,
     rerank_system_prompt,
     save_retrieval_log,
@@ -99,74 +98,6 @@ def test_canonical_document_contains_only_authoritative_embedding_fields() -> No
         "Procedure Examples: Example Group registered a domain."
     )
     assert "forbidden" not in canonical_attack_document(item)
-
-
-@pytest.mark.asyncio
-async def test_normalizes_behavior_for_vector_retrieval() -> None:
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(
-        return_value=SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=json.dumps(
-                            {
-                                "normalized_query": (
-                                    "Exploit an unauthenticated vulnerability in a "
-                                    "public-facing application "
-                                    "using a crafted request to achieve remote code execution."
-                                )
-                            }
-                        )
-                    )
-                )
-            ]
-        )
-    )
-    normalized = await normalized_behavior_query(client, "fh-genie", step())
-    assert normalized.startswith("Exploit an unauthenticated vulnerability")
-    payload = json.loads(client.chat.completions.create.await_args.kwargs["messages"][1]["content"])
-    assert payload["action"] == step().action
-    assert client.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 512
-
-
-@pytest.mark.asyncio
-async def test_empty_normalized_query_logs_response_metadata(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    client = MagicMock()
-    client.chat.completions.create = AsyncMock(
-        return_value=SimpleNamespace(
-            id="response-123",
-            model="fh-genie",
-            usage=SimpleNamespace(model_dump=lambda: {"completion_tokens": 2048}),
-            choices=[
-                SimpleNamespace(
-                    finish_reason="length",
-                    message=SimpleNamespace(content="", reasoning_content="internal reasoning"),
-                )
-            ],
-        )
-    )
-
-    with (
-        caplog.at_level("WARNING"),
-        pytest.raises(ValueError, match="Empty FH Genie normalized-query response"),
-    ):
-        await normalized_behavior_query(client, "fh-genie", step())
-
-    record = next(
-        item
-        for item in caplog.records
-        if item.getMessage().startswith("Empty FH Genie normalized-query response metadata")
-    )
-    assert record.fh_genie_response_metadata == {
-        "response_id": "response-123",
-        "model": "fh-genie",
-        "finish_reason": "length",
-        "reasoning_content_length": 18,
-        "usage": {"completion_tokens": 2048},
-    }
 
 
 def test_cache_key_changes_for_every_embedded_field_and_model() -> None:

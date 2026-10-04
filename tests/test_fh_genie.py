@@ -15,7 +15,7 @@ from app.enrichment.fh_genie import (
     ExtractionResponseError,
     FHGenieEvidenceAgent,
 )
-from app.models import ExploitStepEnvelope, Reference, SelectionReason
+from app.models import Reference, SelectionReason
 
 
 def advisory() -> FetchedAdvisory:
@@ -56,7 +56,7 @@ def test_openrouter_can_be_selected_explicitly() -> None:
     assert agent.model == "anthropic/claude-opus-4.6"
     assert agent.provider == "openrouter"
     assert agent.client is api
-    assert agent.embedding_client is api
+    assert agent.downstream_client is api
 
 
 def test_fh_genie_is_the_default_even_with_an_openrouter_key() -> None:
@@ -74,10 +74,6 @@ def test_fh_genie_is_the_default_even_with_an_openrouter_key() -> None:
 
 def test_full_attack_chain_analysis_is_the_default() -> None:
     assert Settings(_env_file=None).ctid_only_mode is False
-
-
-def test_extraction_time_normalization_is_the_default() -> None:
-    assert Settings(_env_file=None).enable_query_normalization is False
 
 
 @pytest.mark.asyncio
@@ -160,53 +156,8 @@ def isolate_fh_genie_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(fh_genie_module, "RESPONSE_LOG_DIR", tmp_path)
 
 
-def grounding_response(
-    supported: bool = True,
-    confidence: float = 0.90,
-    reasoning: str = "The advisory supports the same attacker action.",
-) -> SimpleNamespace:
-    return response(
-        json.dumps(
-            {
-                "supported": supported,
-                "confidence": confidence,
-                "reasoning": reasoning,
-            }
-        )
-    )
-
-
-def evidence_result(
-    supporting_text: str,
-    source_url: str = "https://research.example/advisory",
-) -> ExploitStepEnvelope:
-    return ExploitStepEnvelope.model_validate(
-        {
-            "steps": [
-                {
-                    "step": 1,
-                    "action": "Register domain",
-                    "prerequisites": [],
-                    "outcome": "Domain controlled",
-                    "evidence": [{"source_url": source_url, "supporting_text": supporting_text}],
-                }
-            ]
-        }
-    )
-
-
-def extraction_and_grounding_mock(
-    extraction_content: str,
-    grounding: SimpleNamespace | None = None,
-) -> AsyncMock:
-    async def create(**kwargs: object) -> SimpleNamespace:
-        messages = kwargs["messages"]
-        assert isinstance(messages, list)
-        if "validate whether extracted exploit evidence" in messages[0]["content"]:
-            return grounding or grounding_response()
-        return response(extraction_content)
-
-    return AsyncMock(side_effect=create)
+def extraction_mock(extraction_content: str) -> AsyncMock:
+    return AsyncMock(return_value=response(extraction_content))
 
 
 def test_claude_prompt_requires_one_minimal_exploit_step_response() -> None:
@@ -234,7 +185,7 @@ async def test_extracts_from_normalized_description_without_advisory() -> None:
         text="An attacker can generate a JWT token and the broker will accept it.",
     )
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         '{"steps":[{"step":1,"action":"Forge JWT token","prerequisites":[],'
         '"outcome":"Broker accepts token","evidence":[{"source_url":'
         '"https://nvd.nist.gov/vuln/detail/CVE-2026-33557","supporting_text":'
@@ -250,7 +201,7 @@ async def test_extracts_from_normalized_description_without_advisory() -> None:
 @pytest.mark.asyncio
 async def test_extracts_sequential_grounded_steps() -> None:
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         '{"steps":[{"step":1,"action":"Register domain","prerequisites":[], '
         '"outcome":"Domain controlled","evidence":[{"source_url":'
         '"https://research.example/advisory","supporting_text":'
@@ -263,39 +214,12 @@ async def test_extracts_sequential_grounded_steps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grounding_accepts_equivalent_trailing_slash_url() -> None:
-    result = ExploitStepEnvelope.model_validate(
-        {
-            "steps": [
-                {
-                    "step": 1,
-                    "action": "Register domain",
-                    "prerequisites": [],
-                    "outcome": "Domain controlled",
-                    "evidence": [
-                        {
-                            "source_url": "https://research.example/advisory/",
-                            "supporting_text": "The attacker registers the abandoned domain.",
-                        }
-                    ],
-                }
-            ]
-        }
-    )
-
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(return_value=grounding_response())
-    assert await FHGenieEvidenceAgent(settings(), api)._is_grounded(result, [advisory()])
-
-
-@pytest.mark.asyncio
 async def test_extraction_pipeline_skips_grounding() -> None:
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         '{"steps":[{"step":1,"action":"Invented","prerequisites":[], '
         '"outcome":"Invented","evidence":[{"source_url":'
         '"https://research.example/advisory","supporting_text":"private invented text"}]}]}',
-        grounding_response(False, 0.05, "The technical claim is absent."),
     )
 
     steps = await FHGenieEvidenceAgent(settings(), api).extract("CVE-2026-22306", [advisory()])
@@ -351,7 +275,7 @@ async def test_handles_malformed_json() -> None:
 async def test_handles_json_with_markdown_fences() -> None:
     """Test that JSON wrapped in markdown code fences is extracted and parsed."""
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         "```json\n"
         '{"steps":[{"step":1,"action":"Register domain","prerequisites":[], '
         '"outcome":"Domain controlled","evidence":[{"source_url":'
@@ -370,7 +294,7 @@ async def test_handles_json_with_markdown_fences() -> None:
 async def test_handles_json_with_text_before_object() -> None:
     """Test that JSON preceded by explanatory text is extracted."""
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         "Here is the extracted exploit sequence:\n"
         '{"steps":[{"step":1,"action":"Register domain","prerequisites":[], '
         '"outcome":"Domain controlled","evidence":[{"source_url":'
@@ -388,7 +312,7 @@ async def test_handles_json_with_text_before_object() -> None:
 async def test_handles_json_with_markdown_fences_no_language() -> None:
     """Test markdown code fence extraction without language specifier."""
     api = MagicMock()
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         "```\n"
         '{"steps":[{"step":1,"action":"Register domain","prerequisites":[], '
         '"outcome":"Domain controlled","evidence":[{"source_url":'
@@ -493,7 +417,7 @@ async def test_regression_multiple_advisories_extracted_successfully() -> None:
 
     api = MagicMock()
     # Simulate LLM response with markdown formatting (common variation)
-    api.chat.completions.create = extraction_and_grounding_mock(
+    api.chat.completions.create = extraction_mock(
         "```json\n"
         "{\n"
         '  "steps": [\n'
@@ -549,203 +473,3 @@ async def test_error_context_includes_diagnostic_info() -> None:
     assert error.context is not None
     assert "error" in error.context
     assert error.context.get("error", "")  # Should have error details
-
-
-@pytest.mark.asyncio
-async def test_grounding_accepts_same_meaning_with_different_wording() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(return_value=grounding_response())
-    agent = FHGenieEvidenceAgent(settings(), api)
-
-    invalid = await agent._unsupported_steps(
-        evidence_result("An adversary takes control of the expired domain."),
-        [advisory()],
-    )
-
-    assert invalid == []
-    assert api.chat.completions.create.await_args.kwargs["temperature"] == 0.0
-
-
-@pytest.mark.asyncio
-async def test_grounding_rejects_unsupported_technical_claim() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=grounding_response(
-            supported=False,
-            confidence=0.04,
-            reasoning="The evidence adds a PowerShell execution fact absent from the source.",
-        )
-    )
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        evidence_result("The attacker executes payload.exe with PowerShell."),
-        [advisory()],
-    )
-
-    assert invalid == [1]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("confidence", "expected"),
-    [(0.69, [1]), (0.70, [])],
-    ids=["confidence-0.69-rejected", "confidence-0.70-accepted"],
-)
-async def test_grounding_confidence_threshold(
-    confidence: float,
-    expected: list[int],
-) -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(return_value=grounding_response(confidence=confidence))
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        evidence_result("An adversary takes control of the expired domain."),
-        [advisory()],
-    )
-
-    assert invalid == expected
-
-
-@pytest.mark.asyncio
-async def test_grounding_requires_supported_flag_and_confidence() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        return_value=grounding_response(
-            supported=False,
-            confidence=0.70,
-            reasoning="Deliberately inconsistent output used to verify the decision rule.",
-        )
-    )
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        evidence_result("An adversary takes control of the expired domain."),
-        [advisory()],
-    )
-
-    assert invalid == [1]
-
-
-@pytest.mark.asyncio
-async def test_grounding_keeps_step_when_one_evidence_item_survives() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        side_effect=[
-            grounding_response(
-                supported=False,
-                confidence=0.95,
-                reasoning="The evidence adds a technical fact absent from the advisory.",
-            ),
-            grounding_response(supported=True, confidence=0.70),
-        ]
-    )
-    result = ExploitStepEnvelope.model_validate(
-        {
-            "steps": [
-                {
-                    "step": 1,
-                    "action": "Register domain",
-                    "prerequisites": [],
-                    "outcome": "Domain controlled",
-                    "evidence": [
-                        {
-                            "source_url": "https://research.example/advisory",
-                            "supporting_text": "The attacker uses PowerShell.",
-                        },
-                        {
-                            "source_url": "https://research.example/advisory",
-                            "supporting_text": "An adversary takes control of the expired domain.",
-                        },
-                    ],
-                }
-            ]
-        }
-    )
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        result,
-        [advisory()],
-    )
-
-    assert invalid == []
-    assert [item.supporting_text for item in result.steps[0].evidence] == [
-        "An adversary takes control of the expired domain."
-    ]
-
-
-@pytest.mark.asyncio
-async def test_grounding_appends_accepted_and_rejected_json_records(tmp_path: Path) -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(
-        side_effect=[
-            grounding_response(False, 0.95, "The source does not support this claim."),
-            grounding_response(True, 0.70, "The source supports the same action."),
-        ]
-    )
-    result = ExploitStepEnvelope.model_validate(
-        {
-            "steps": [
-                {
-                    "step": 1,
-                    "action": "Register domain",
-                    "prerequisites": [],
-                    "outcome": "Domain controlled",
-                    "evidence": [
-                        {
-                            "source_url": "https://research.example/advisory",
-                            "supporting_text": "Unsupported claim.",
-                        },
-                        {
-                            "source_url": "https://research.example/advisory",
-                            "supporting_text": "Equivalent supported claim.",
-                        },
-                    ],
-                }
-            ]
-        }
-    )
-
-    await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        result,
-        [advisory()],
-        "CVE-2026-22306",
-    )
-
-    log_file = tmp_path / "CVE-2026-22306_grounding.json"
-    records = json.loads(log_file.read_text(encoding="utf-8"))
-    assert [record["accepted"] for record in records] == [False, True]
-    assert records[0]["supported"] is False
-    assert records[0]["confidence"] == 0.95
-    assert records[1]["supported"] is True
-    assert records[1]["confidence"] == 0.70
-    assert all(record["cve_id"] == "CVE-2026-22306" for record in records)
-    assert all(record["timestamp"] for record in records)
-
-
-@pytest.mark.asyncio
-async def test_grounding_rejects_source_url_not_found_without_model_call() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock()
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        evidence_result(
-            "The attacker registers the abandoned domain.",
-            source_url="https://other.example/advisory",
-        ),
-        [advisory()],
-    )
-
-    assert invalid == [1]
-    api.chat.completions.create.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_grounding_handles_malformed_json_safely() -> None:
-    api = MagicMock()
-    api.chat.completions.create = AsyncMock(return_value=response("not JSON"))
-
-    invalid = await FHGenieEvidenceAgent(settings(), api)._unsupported_steps(
-        evidence_result("The attacker registers the abandoned domain."),
-        [advisory()],
-    )
-
-    assert invalid == [1]

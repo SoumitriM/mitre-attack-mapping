@@ -15,11 +15,8 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=15.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0, le=10)
     mapping_min_confidence: float = Field(default=0.50, ge=0, le=1)
-    validation_min_confidence: float = Field(default=0.5, ge=0, le=1)
-    enable_llm_validation: bool = False
     enable_ctid_mapping: bool = True
     ctid_only_mode: bool = False
-    llm_validation_confidence_threshold: float = Field(default=0.8, ge=0, le=1)
     advisory_allowed_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["offseq.com"]
     )
@@ -28,7 +25,6 @@ class Settings(BaseSettings):
     fh_genie_base_url: str | None = None
     fh_genie_model: str | None = "MiniMaxAI/MiniMax-M2.5"
     fh_genie_embedding_model: str = "BAAI/bge-m3"
-    enable_query_normalization: bool = False
     attack_embedding_cache_path: Path = Path("data/cache/attack-embeddings.json")
     inference_provider: Literal["fh_genie", "openrouter"] = "fh_genie"
     openrouter_key: SecretStr | None = None

@@ -15,7 +15,6 @@ from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.candidate_retrieval import EmbeddingClient, RerankClient
 from app.enrichment.ctid_mapper import FHGenieCTIDCVEMapper
 from app.enrichment.fh_genie import AsyncCompatibleClient, FHGenieEvidenceAgent
-from app.enrichment.validation_agent import FHGenieValidationAgent
 from app.evaluation import evaluate_predictions
 from app.graph.repository import GraphRepository, GraphUnavailable
 from app.models import CVEAnalysis
@@ -56,13 +55,11 @@ async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
                 )
                 agent = None
                 mapper = None
-                validator = None
                 ctid_mapper = FHGenieCTIDCVEMapper(settings.fh_genie_model, downstream_client)
             else:
                 agent = FHGenieEvidenceAgent(settings)
                 downstream_client = agent.downstream_client
                 mapper = FHGenieAttackMapper(settings, downstream_client)
-                validator = FHGenieValidationAgent(settings, downstream_client)
                 ctid_mapper = (
                     FHGenieCTIDCVEMapper(mapper.model, downstream_client)
                     if settings.enable_ctid_mapping
@@ -71,7 +68,6 @@ async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
         except ValueError:
             agent = None
             mapper = None
-            validator = None
             ctid_mapper = None
             downstream_client = None
         graph = GraphRepository(
@@ -81,22 +77,16 @@ async def _analyze_many(cve_ids: list[str]) -> list[dict[str, object]]:
             cast(RerankClient, downstream_client) if downstream_client else None,
             settings.downstream_model if downstream_client else None,
             settings.attack_embedding_cache_path,
-            normalize_vector_queries=settings.enable_query_normalization,
         )
         await graph.initialize()
         async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
             service = CVEAnalysisService(
-                settings, graph, client, agent, mapper, validator, ctid_mapper
+                settings, graph, client, agent, mapper, ctid_mapper
             )
             results = [await service.analyze(cve_id) for cve_id in cve_ids]
         return [result.model_dump(mode="json") for result in results]
     finally:
         await driver.close()
-
-
-async def _analyze(cve_id: str) -> dict[str, object]:
-    """Analyze one CVE for callers that use the original internal helper."""
-    return (await _analyze_many([cve_id]))[0]
 
 
 async def _initialize_attack_embedding_cache() -> int:

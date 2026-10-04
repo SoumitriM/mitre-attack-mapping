@@ -16,10 +16,6 @@ from app.models import (
     CVEAttackBehaviorEnvelope,
     CVERecord,
     ExploitStep,
-    ValidatedAttackStep,
-    ValidationChecks,
-    ValidationDetails,
-    ValidationStatus,
 )
 
 
@@ -153,7 +149,6 @@ async def test_description_ctid_mapping_accepts_schema_valid_unretrieved_ids() -
     assert mappings.exploitation_techniques[0].mitre_technique_id == "T9999"
     assert mappings.exploitation_techniques[0].mitre_tactic_id is None
     assert mappings.exploitation_techniques[0].validation is None
-
 
 
 @pytest.mark.asyncio
@@ -446,40 +441,13 @@ async def test_maps_categories_without_independent_validation() -> None:
             )
         ]
     )
-    validator = MagicMock()
-    validator.validate = AsyncMock(
-        return_value=[
-            ValidatedAttackStep(
-                step=1,
-                action="The client downloads an attacker-controlled archive",
-                proposed_technique_id="T1105",
-                mitre_tactic_id="TA0011",
-                evidence_ids=[ev_id],
-                validation=ValidationDetails(
-                    status=ValidationStatus.VALIDATED,
-                    checks=ValidationChecks(
-                        technique_exists=True,
-                        tactic_valid=True,
-                        platform_compatible=True,
-                        evidence_support=True,
-                        semantic_match=True,
-                    ),
-                    reasoning="The evidence supports the official technique.",
-                    validator_confidence=0.8,
-                ),
-            )
-        ]
-    )
 
-    mappings = await FHGenieCTIDCVEMapper("test-model", api).map(
-        cve(), [item], graph, mapper, validator
-    )
+    mappings = await FHGenieCTIDCVEMapper("test-model", api).map(cve(), [item], graph, mapper)
 
     assert mappings.exploitation_techniques[0].mitre_technique_id == "T1105"
     assert mappings.primary_impacts == []
     graph.attack_candidates.assert_awaited_once()
     mapper.map_steps.assert_awaited_once()
-    validator.validate.assert_not_awaited()
     graph.official_attack_context.assert_not_awaited()
     assert mapper.map_steps.await_args.kwargs == {"schema_only": True}
     assert mappings.exploitation_techniques[0].validation is None
@@ -524,12 +492,10 @@ async def test_et_pi_and_si_are_sent_through_attack_mapping() -> None:
     graph.official_attack_context = AsyncMock(return_value={})
     attack_mapper = MagicMock()
     attack_mapper.map_steps = AsyncMock(return_value=[])
-    validator = MagicMock()
-    validator.validate = AsyncMock(return_value=[])
     ctid_mapper = FHGenieCTIDCVEMapper("test-model", MagicMock())
     ctid_mapper.identify_behaviors = AsyncMock(return_value=envelope)
 
-    mappings = await ctid_mapper.map(cve(), [step()], graph, attack_mapper, validator)
+    mappings = await ctid_mapper.map(cve(), [step()], graph, attack_mapper)
 
     retrieved_actions = [call.args[0].action for call in graph.attack_candidates.await_args_list]
     mapped_actions = [call.args[1][0].action for call in attack_mapper.map_steps.await_args_list]

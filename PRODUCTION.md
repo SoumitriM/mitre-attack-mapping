@@ -121,11 +121,8 @@ NVD_API_KEY=<secret>
 HTTP_TIMEOUT_SECONDS=30
 HTTP_MAX_RETRIES=3
 MAPPING_MIN_CONFIDENCE=0.50
-VALIDATION_MIN_CONFIDENCE=0.5
-ENABLE_LLM_VALIDATION=false
 ENABLE_CTID_MAPPING=true
 CTID_ONLY_MODE=false
-LLM_VALIDATION_CONFIDENCE_THRESHOLD=0.8
 ADVISORY_ALLOWED_DOMAINS=offseq.com
 ADVISORY_MAX_BYTES=2000000
 ATTACK_EMBEDDING_CACHE_PATH=data/cache/attack-embeddings.json
@@ -140,8 +137,8 @@ Only exploit-step extraction switches providers. Embeddings, ATT&CK reranking, A
 and CTID mapping continue to use FH Genie. Before extraction, the service fetches at most two successful
 vendor-prioritized advisories, removes boilerplate and duplicate or unrelated passages, and uses
 FH Genie MiniMax to create the compact attack passage. OpenRouter receives only that passage.
-The extractor emits atomic retrieval-ready actions, and `ENABLE_QUERY_NORMALIZATION=false` keeps
-vector retrieval on those actions without a second LLM rewrite.
+The extractor emits atomic retrieval-ready actions. Vector retrieval uses the step fields and
+evidence directly without a second LLM rewrite.
 
 ```env
 INFERENCE_PROVIDER=openrouter

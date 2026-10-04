@@ -90,14 +90,6 @@ class ExploitStepEnvelope(BaseModel):
         return self
 
 
-class GroundingResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    supported: bool
-    confidence: float = Field(ge=0, le=1)
-    reasoning: str = Field(min_length=1)
-
-
 class AttackCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -262,47 +254,6 @@ class GraphEdge(BaseModel):
 class EvidenceSubgraph(BaseModel):
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
-
-
-class PresentationProvenance(StrEnum):
-    AUTHORITATIVE = "authoritative"
-    ADVISORY_DERIVED = "advisory_derived"
-    LLM_INFERRED = "llm_inferred"
-
-
-class PresentationNode(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    type: str
-    label: str
-    provenance: PresentationProvenance
-    properties: dict[str, object] = Field(default_factory=dict)
-
-
-class PresentationEdge(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source: str
-    target: str
-    relationship: str
-    provenance: PresentationProvenance
-    properties: dict[str, object] = Field(default_factory=dict)
-
-
-class AttackChainGraph(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    cve_id: str
-    nodes: list[PresentationNode] = Field(default_factory=list)
-    edges: list[PresentationEdge] = Field(default_factory=list)
-    legend: dict[str, str] = Field(
-        default_factory=lambda: {
-            "authoritative": "Official CVE/ATT&CK relationship",
-            "advisory_derived": "Exploit behavior extracted from advisory evidence",
-            "llm_inferred": "ATT&CK mapping proposed by an LLM and independently validated",
-        }
-    )
 
 
 class CVEAnalysis(BaseModel):
