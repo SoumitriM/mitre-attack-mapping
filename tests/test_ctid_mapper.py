@@ -41,19 +41,22 @@ def sources():
     return steps, mappings, attack_chain_from_mappings(steps, mappings)
 
 
-def node(prefix, index, action, enabled_by):
+def node(prefix, index, action, enabled_by, source_step=None, supporting_steps=None):
     return {
         "id": f"{prefix}-{index}", "action": action, "enabled_by": enabled_by,
+        "source_step": source_step, "supporting_steps": supporting_steps or [1],
+        "reasoning": "Evidence establishes this causal relationship.",
     }
 
 
 def payload(steps, *, outcome_pi=False):
     return {
-        "exploitation_techniques": [node("ET", 1, steps[0].action, [])],
+        "exploitation_techniques": [node("ET", 1, steps[0].action, [], 1, [1])],
         "primary_impacts": [node(
-            "PI", 1, "Command execution obtained" if outcome_pi else steps[1].action, ["ET-1"]
+            "PI", 1, "Command execution obtained" if outcome_pi else steps[1].action, ["ET-1"],
+            None if outcome_pi else 2, [1] if outcome_pi else [2]
         )],
-        "secondary_impacts": [node("SI", 1, steps[2].action, ["PI-1"])],
+        "secondary_impacts": [node("SI", 1, steps[2].action, ["PI-1"], 3, [3])],
     }
 
 
@@ -92,7 +95,7 @@ async def test_reuses_source_ids_with_one_causal_call_and_no_input_mutation():
     assert supplied["attack_chain"] == before[2]
     assert supplied["attack_mappings"] == before[1]
     assert "candidates" not in supplied
-    assert "Do not generate, validate" in request["messages"][0]["content"]
+    assert "not ATT&CK mapping" in request["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -107,7 +110,7 @@ async def test_outcome_pi_and_si_never_borrow_an_exploit_mapping():
         assert item.mitre_technique_id is None
         assert item.mitre_tactic_id is None
         assert item.confidence == 0.0
-        assert item.evidence_ids == []
+        assert item.evidence_ids
     assert result.secondary_impacts[0].enabled_by == ["PI-1"]
 
 
@@ -158,14 +161,14 @@ async def test_multiple_paths_preserve_separate_et_pi_si_links():
     chain = attack_chain_from_mappings(steps, mappings)
     data = {
         "exploitation_techniques": [
-            node("ET", 1, steps[0].action, []),
-            node("ET", 2, steps[1].action, []),
+            node("ET", 1, steps[0].action, [], 1, [1]),
+            node("ET", 2, steps[1].action, [], 2, [2]),
         ],
         "primary_impacts": [
             node("PI", 1, "First capability obtained", ["ET-1"]),
             node("PI", 2, "Separate capability obtained", ["ET-2"]),
         ],
-        "secondary_impacts": [node("SI", 1, steps[2].action, ["PI-2"])],
+        "secondary_impacts": [node("SI", 1, steps[2].action, ["PI-2"], 3, [3])],
     }
     ctid, _ = mapper_for(data)
     result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
@@ -275,34 +278,87 @@ async def test_ctid_enabled_and_disabled_preserve_identical_attack_outputs(monke
 
 
 @pytest.mark.asyncio
-async def test_coherent_sequence_and_paraphrases_keep_nodes_with_null_ids():
+async def test_coherent_sequence_reuses_primary_source_mapping_with_paraphrased_action():
     steps, mappings, chain = sources()
     data = payload(steps, outcome_pi=True)
     data["exploitation_techniques"][0]["action"] = "Deliver and trigger a crafted exploit request"
+    data["exploitation_techniques"][0]["supporting_steps"] = [1, 2]
     ctid, _ = mapper_for(data)
     result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
     assert result.exploitation_techniques[0].action == data["exploitation_techniques"][0]["action"]
-    assert result.exploitation_techniques[0].mitre_technique_id is None
+    assert result.exploitation_techniques[0].mitre_technique_id == "T1190"
+    assert result.exploitation_techniques[0].evidence_ids == [
+        "existing-evidence-1", "existing-evidence-2"
+    ]
     assert result.primary_impacts[0].enabled_by == ["ET-1"]
     assert result.secondary_impacts[0].enabled_by == ["PI-1"]
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_identical_source_actions_do_not_select_a_mapping():
+async def test_explicit_source_step_disambiguates_identical_actions():
     steps, mappings, _ = sources()
     steps[1] = steps[1].model_copy(update={"action": steps[0].action})
     chain = attack_chain_from_mappings(steps, mappings)
     data = payload(steps, outcome_pi=True)
     ctid, _ = mapper_for(data)
     result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
-    assert result.exploitation_techniques[0].mitre_technique_id is None
-    assert result.exploitation_techniques[0].mitre_tactic_id is None
+    assert result.exploitation_techniques[0].mitre_technique_id == "T1190"
+    assert result.exploitation_techniques[0].mitre_tactic_id == "TA0001"
 
 
 def test_internal_node_schema_has_only_user_requested_fields():
     from app.enrichment.ctid_mapper import CTID_SYSTEM_PROMPT, CTIDCausalNode
 
-    assert set(CTIDCausalNode.model_fields) == {"id", "action", "enabled_by"}
-    assert "source_step" not in CTID_SYSTEM_PROMPT
-    assert "supporting_steps" not in CTID_SYSTEM_PROMPT
-    assert "Empty output is valid only when" in CTID_SYSTEM_PROMPT
+    assert set(CTIDCausalNode.model_fields) == {
+        "id", "action", "enabled_by", "source_step", "supporting_steps", "reasoning"
+    }
+    assert "source_step" in CTID_SYSTEM_PROMPT
+    assert "supporting_steps" in CTID_SYSTEM_PROMPT
+    assert "Empty arrays are valid only when" in CTID_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("change", ["empty-support", "unknown-support", "source-not-supported"])
+@pytest.mark.asyncio
+async def test_requires_existing_supporting_steps_and_valid_source_reference(change):
+    steps, mappings, chain = sources()
+    data = payload(steps)
+    et = data["exploitation_techniques"][0]
+    if change == "empty-support":
+        et["supporting_steps"] = []
+    elif change == "unknown-support":
+        et["supporting_steps"] = [404]
+    else:
+        et["source_step"] = 2
+    ctid, _ = mapper_for(data)
+    with pytest.raises(CTIDMappingError):
+        await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+
+
+@pytest.mark.asyncio
+async def test_supporting_steps_may_be_shared_without_borrowing_mapping():
+    steps, mappings, chain = sources()
+    data = payload(steps, outcome_pi=True)
+    data["secondary_impacts"] = [node("SI", 1, "Downstream consequence", ["PI-1"], None, [1])]
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id="CVE-2026-33557"), steps, chain, mappings)
+    assert result.exploitation_techniques[0].mitre_technique_id == "T1190"
+    assert result.primary_impacts[0].mitre_technique_id is None
+    assert result.secondary_impacts[0].mitre_technique_id is None
+    assert result.primary_impacts[0].evidence_ids == result.secondary_impacts[0].evidence_ids
+
+
+@pytest.mark.asyncio
+async def test_sequence_et_with_no_primary_source_still_has_causal_nodes():
+    steps, mappings, chain = sources()
+    data = payload(steps, outcome_pi=True)
+    data['exploitation_techniques'][0].update(
+        action='Exploit through the supported request sequence',
+        source_step=None,
+        supporting_steps=[1, 2],
+    )
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id='CVE-2026-33557'), steps, chain, mappings)
+    assert len(result.exploitation_techniques) == 1
+    assert result.exploitation_techniques[0].mitre_technique_id is None
+    assert result.primary_impacts[0].enabled_by == ['ET-1']
+    assert result.secondary_impacts[0].enabled_by == ['PI-1']
