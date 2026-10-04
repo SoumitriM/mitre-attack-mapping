@@ -64,7 +64,7 @@ async def test_ctid_failure_is_explicitly_logged_and_reported(caplog, monkeypatc
     )
 
     with caplog.at_level("ERROR"):
-        result = await service.analyze(cve.cve_id)
+        result = await service.analyze(cve.cve_id, description_source="advisories")
 
     assert result.cve_level_attack_mappings.exploitation_techniques == []
     assert "CVE-level CTID mapping failed: contract mismatch" in result.warnings
@@ -111,7 +111,7 @@ async def test_request_data_is_not_read_from_or_written_to_neo4j(caplog, monkeyp
     )
 
     with caplog.at_level("INFO"):
-        result = await service.analyze(cve.cve_id)
+        result = await service.analyze(cve.cve_id, description_source="advisories")
 
     ctid_mapper.map.assert_not_awaited()
     graph.cached_cve.assert_not_awaited()

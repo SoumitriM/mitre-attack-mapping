@@ -8,7 +8,6 @@ import httpx
 from app.advisory.client import (
     AdvisoryClient,
     FetchedAdvisory,
-    SelectedReference,
     UnsupportedAdvisoryContent,
     select_references,
 )
@@ -21,12 +20,12 @@ from app.enrichment.ctid_mapper import (
     empty_ctid_mappings,
 )
 from app.enrichment.fh_genie import (
-    DescriptionEvidence,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
     normalized_description_evidence,
 )
 from app.graph.repository import GraphRepository, GraphUnavailable
+from app.ingestion.description import description_has_exploit_behavior
 from app.ingestion.opencve import fetch_opencve_description
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
@@ -113,7 +112,7 @@ class CVEAnalysisService:
         return await self.analyze(cve_id, description_source="opencve")
 
     async def analyze(
-        self, cve_id: str, *, description_source: Literal["advisories", "opencve"] = "advisories"
+        self, cve_id: str, *, description_source: Literal["auto", "advisories", "opencve"] = "auto"
     ) -> CVEAnalysis:
         if description_source == "opencve" and self.settings.ctid_only_mode:
             raise ValueError("OpenCVE extraction requires ctid_only_mode=False")
@@ -125,104 +124,78 @@ class CVEAnalysisService:
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
-        description: DescriptionEvidence | None
-        description_result: DescriptionEvidenceResult | None
-        if description_source == "opencve":
-            description = await fetch_opencve_description(cve.cve_id, self.client)
-            cve = cve.model_copy(deep=True)
-            cve.description = description.text
-            cve.field_provenance["description"] = ["OpenCVE"]
-            cve.sources.append(
-                SourceAttribution(
-                    name="OpenCVE", url=description.source_url, retrieved_at=datetime.now(UTC)
+        description = normalized_description_evidence(cve)
+        if description_source in {"auto", "opencve"}:
+            try:
+                description = await fetch_opencve_description(cve.cve_id, self.client)
+            except (httpx.HTTPError, ValueError) as exc:
+                if description_source == "opencve":
+                    raise
+                warnings.append(
+                    f"OpenCVE description unavailable ({type(exc).__name__}); "
+                    "using authoritative description"
                 )
-            )
-            description_result = DescriptionEvidenceResult(
+            else:
+                cve = cve.model_copy(deep=True)
+                cve.description = description.text
+                cve.field_provenance["description"] = ["OpenCVE"]
+                cve.sources.append(
+                    SourceAttribution(
+                        name="OpenCVE", url=description.source_url, retrieved_at=datetime.now(UTC)
+                    )
+                )
+        description_result = (
+            DescriptionEvidenceResult(
                 source_name=description.source_name,
                 source_url=description.source_url,
                 extraction_status=ExtractionStatus.COMPLETED,
             )
-        else:
-            selected = sorted(
-                select_references(cve.references, self.settings.advisory_allowed_domains),
-                key=advisory_priority,
-            )
-            advisory_client = AdvisoryClient(
-                self.client, max_bytes=self.settings.advisory_max_bytes
-            )
-            description = normalized_description_evidence(cve)
-            description_result = (
-                DescriptionEvidenceResult(
-                    source_name=description.source_name,
-                    source_url=description.source_url,
-                    extraction_status=ExtractionStatus.COMPLETED,
-                )
-                if description
-                else None
-            )
+            if description
+            else None
+        )
+        use_advisories = description_source == "advisories" or (
+            description_source == "auto"
+            and not description_has_exploit_behavior(description.text if description else None)
+        )
+        if use_advisories:
+            if description_source == "auto":
+                warnings.append("Description lacks a concrete exploit mechanism; using advisories")
+            fetched, results, advisory_warnings = await self._fetch_advisories(cve)
+            warnings.extend(advisory_warnings)
 
-            async def fetch_one(item: SelectedReference) -> FetchedAdvisory | Exception:
-                try:
-                    return await advisory_client.fetch(item)
-                except Exception as exc:
-                    return exc
-
-            for selected_item in selected:
-                outcome = await fetch_one(selected_item)
-                if isinstance(outcome, FetchedAdvisory):
-                    fetched.append(outcome)
-                    results.append(
-                        AdvisoryResult(
-                            url=outcome.selected.reference.url,
-                            reference_tags=outcome.selected.reference.tags,
-                            selection_reason=outcome.selected.reason,
-                            retrieved_at=outcome.retrieved_at,
-                            checksum=outcome.checksum,
-                            extraction_status=ExtractionStatus.COMPLETED,
-                        )
-                    )
-                    if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
-                        break
-                else:
-                    status = (
-                        ExtractionStatus.UNSUPPORTED_CONTENT
-                        if isinstance(outcome, UnsupportedAdvisoryContent)
-                        else ExtractionStatus.FETCH_FAILED
-                    )
-                    results.append(
-                        AdvisoryResult(
-                            url=selected_item.reference.url,
-                            reference_tags=selected_item.reference.tags,
-                            selection_reason=selected_item.reason,
-                            extraction_status=status,
-                        )
-                    )
-                    warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
-
-        has_evidence = bool(fetched or description)
-        steps = []
-        if not has_evidence:
+        steps: list[ExploitStep] = []
+        if not (fetched or description):
             warnings.append("No trusted description or advisory evidence was available")
+        elif description_source == "auto" and use_advisories and not fetched:
+            warnings.append(
+                "No advisory evidence was retrieved and the description is insufficient; "
+                "extraction was skipped"
+            )
+            self._mark_extraction_failed(description_result, results)
         elif self.agent is None:
             warnings.append(
                 "The selected inference provider is not configured; "
                 "exploit-step extraction was skipped"
             )
-            if description_result:
-                description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-            for result in results:
-                if result.extraction_status == ExtractionStatus.COMPLETED:
-                    result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+            self._mark_extraction_failed(description_result, results)
         else:
             try:
                 steps = await self.agent.extract(cve.cve_id, fetched, description)
+                if description_source == "auto" and not use_advisories and not steps:
+                    warnings.append(
+                        "Description extraction returned no steps; trying advisory evidence"
+                    )
+                    fetched, results, advisory_warnings = await self._fetch_advisories(cve)
+                    warnings.extend(advisory_warnings)
+                    # A second extraction uses newly retrieved evidence. Never repeat
+                    # the same description-only request if no advisory was fetched.
+                    if fetched:
+                        steps = await self.agent.extract(cve.cve_id, fetched, description)
             except ExtractionResponseError as exc:
                 warnings.append(str(exc))
-                if description_result:
-                    description_result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-                for result in results:
-                    if result.extraction_status == ExtractionStatus.COMPLETED:
-                        result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+                self._mark_extraction_failed(description_result, results)
+        if description_source == "auto" and not steps:
+            warnings.append("No exploit steps were extracted from the available evidence")
 
         mappings: list[AttackMapping] = []
         if steps and self.mapper is None:
@@ -285,6 +258,60 @@ class CVEAnalysisService:
             subgraph=EvidenceSubgraph(),
             warnings=list(dict.fromkeys(warnings)),
         )
+
+    async def _fetch_advisories(
+        self, cve: CVERecord
+    ) -> tuple[list[FetchedAdvisory], list[AdvisoryResult], list[str]]:
+        selected = sorted(
+            select_references(cve.references, self.settings.advisory_allowed_domains),
+            key=advisory_priority,
+        )
+        client = AdvisoryClient(self.client, max_bytes=self.settings.advisory_max_bytes)
+        fetched: list[FetchedAdvisory] = []
+        results: list[AdvisoryResult] = []
+        warnings: list[str] = []
+        for reference in selected:
+            try:
+                advisory = await client.fetch(reference)
+            except Exception as exc:
+                results.append(
+                    AdvisoryResult(
+                        url=reference.reference.url,
+                        reference_tags=reference.reference.tags,
+                        selection_reason=reference.reason,
+                        extraction_status=(
+                            ExtractionStatus.UNSUPPORTED_CONTENT
+                            if isinstance(exc, UnsupportedAdvisoryContent)
+                            else ExtractionStatus.FETCH_FAILED
+                        ),
+                    )
+                )
+                warnings.append(f"Advisory unavailable: {reference.reference.url}")
+            else:
+                fetched.append(advisory)
+                results.append(
+                    AdvisoryResult(
+                        url=advisory.selected.reference.url,
+                        reference_tags=advisory.selected.reference.tags,
+                        selection_reason=advisory.selected.reason,
+                        retrieved_at=advisory.retrieved_at,
+                        checksum=advisory.checksum,
+                        extraction_status=ExtractionStatus.COMPLETED,
+                    )
+                )
+                if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
+                    break
+        return fetched, results, warnings
+
+    @staticmethod
+    def _mark_extraction_failed(
+        description: DescriptionEvidenceResult | None, advisories: list[AdvisoryResult]
+    ) -> None:
+        if description:
+            description.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+        for advisory in advisories:
+            if advisory.extraction_status == ExtractionStatus.COMPLETED:
+                advisory.extraction_status = ExtractionStatus.EXTRACTION_FAILED
 
     async def _analyze_ctid_only(self, cve: CVERecord) -> CVEAnalysis:
         mappings = empty_ctid_mappings()

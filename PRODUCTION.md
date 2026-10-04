@@ -7,7 +7,7 @@ Development tools and tests are not required at runtime.
 
 - Python 3.11 or newer
 - Neo4j 5.x
-- Network access to NVD, CVE List V5, configured advisory domains, and FH Genie
+- Network access to NVD, CVE List V5, OpenCVE, configured advisory domains, and FH Genie
 - An FH Genie API key and base URL
 - An NVD API key is recommended for production rate limits
 
@@ -120,6 +120,9 @@ Recommended application settings:
 NVD_API_KEY=<secret>
 HTTP_TIMEOUT_SECONDS=30
 HTTP_MAX_RETRIES=3
+ANALYSIS_JOB_RETENTION_SECONDS=3600
+ANALYSIS_JOB_CAPACITY=100
+ANALYSIS_JOB_CONCURRENCY=2
 MAPPING_MIN_CONFIDENCE=0.50
 ENABLE_CTID_MAPPING=true
 CTID_ONLY_MODE=false
@@ -134,9 +137,12 @@ content the deployment is expected to retrieve.
 ### Switching to OpenRouter
 
 Only exploit-step extraction switches providers. Embeddings, ATT&CK reranking, ATT&CK mapping,
-and CTID mapping continue to use FH Genie. Before extraction, the service fetches at most two successful
-vendor-prioritized advisories, removes boilerplate and duplicate or unrelated passages, and uses
-FH Genie MiniMax to create the compact attack passage. OpenRouter receives only that passage.
+and CTID mapping continue to use FH Genie. In the default description-first mode,
+extraction receives the OpenCVE description directly when it explains a concrete mechanism. Sparse descriptions or empty extraction
+fall back to at most two successful vendor-prioritized advisories. For those advisories,
+the service removes boilerplate and duplicate or unrelated passages, and uses
+FH Genie MiniMax to create the compact attack passage. OpenRouter receives that passage
+on the advisory path; on the description-only first pass it receives the description.
 The extractor emits atomic retrieval-ready actions. Vector retrieval uses the step fields and
 evidence directly without a second LLM rewrite.
 
@@ -210,9 +216,10 @@ Only trust proxy addresses controlled by the deployment. Place TLS termination, 
 request-size limits, request timeouts, and rate limiting in a reverse proxy or API gateway. The
 application endpoint itself does not implement authentication.
 
-For multiple application processes, use the process manager provided by the deployment platform.
-Start with one worker and increase concurrency only after measuring FH Genie, NVD, and Neo4j limits.
-A batch request currently processes CVEs in input order within one request.
+Run **one application worker**: polling jobs are process-local and are not shared across
+processes. To allow more simultaneous batches, tune `ANALYSIS_JOB_CONCURRENCY` after
+measuring FH Genie, NVD, and Neo4j limits. Each batch processes CVEs in input order.
+A shared durable queue/store would be needed before adding workers or replicas.
 
 ## Health and smoke checks
 
@@ -239,34 +246,39 @@ curl --fail-with-body \
   --data '{"cve_ids":["CVE-2021-44228"]}'
 ```
 
-The default response contains the CVE ID, required attack-chain fields, and the three CTID groups:
+The POST returns HTTP 202 with a job identifier and polling URL:
 
 ```json
-[
-  {
-    "cve_id": "CVE-2021-44228",
-    "attack_chain": [
-      {
-        "step": 1,
-        "action": "Example evidence-supported action",
-        "technique_id": "T1190",
-        "tactic_id": "TA0001",
-        "confidence": 0.9,
-        "mapped": true
-      }
-    ],
-    "ctid_map": {
-      "exploitation_techniques": [],
-      "primary_impacts": [],
-      "secondary_impacts": []
-    }
-  }
-]
+{"job_id":"<uuid>","status":"pending","poll_url":"/api/cve-analysis/<uuid>"}
 ```
 
-Technique and tactic IDs are `null` when `mapped` is `false`. Use `?compact=false` only for
-authorized diagnostic consumers because the full response includes advisory evidence and internal
-analysis fields.
+Poll using GET, waiting approximately three seconds between calls:
+
+```bash
+curl --fail-with-body 'http://127.0.0.1:8000/api/cve-analysis/<uuid>'
+```
+
+Pending GET responses remain HTTP 200 with `status: "pending"` and no results.
+After the entire batch finishes, GET returns `status: "completed"` with a
+`results` array of the existing compact CVE/attack-chain/CTID views. The returned
+URL can be polled again without repeating model or source calls. Each new POST
+starts a new job. A batch failure becomes `status: "failed"` with an `error`
+containing its code and message; partial results are not returned.
+
+Use `?compact=false` on the initial POST for full diagnostic results. The body
+can set `description_source` to `auto` (default), `opencve`, or `advisories`.
+Auto first uses description evidence; sparse descriptions or successful empty
+extraction trigger advisory retrieval and compression. OpenCVE fetch failures
+fall back to the authoritative description. No same-evidence extraction retry
+is introduced by this fallback. Source reasons and empty-extraction warnings are
+available in full results.
+
+Jobs are retained in server memory for `ANALYSIS_JOB_RETENTION_SECONDS` after
+completion or failure (default one hour). Expired/unknown jobs return 404.
+`ANALYSIS_JOB_CAPACITY` bounds active and retained jobs together (default 100);
+when full, submission returns 503. `ANALYSIS_JOB_CONCURRENCY` limits simultaneous
+batches (default two); queued jobs also return pending. Shutdown cancels active
+jobs and releases resources. A restart clears all jobs, including completed results.
 
 ## CTID modes
 
@@ -286,9 +298,10 @@ produce the normal attack-chain response.
 - Neo4j stores only Enterprise ATT&CK techniques, tactics, their relationships, and the ATT&CK
   dataset-release marker.
 - CVE records, advisories, evidence, exploit steps, mappings, validation results, and CTID results
-  remain in process memory only until the response is serialized. They are never written to Neo4j.
-- Each request retrieves CVE source data again. Restarting the API does not lose any required CVE
-  state because no per-CVE state is retained.
+  remain in process memory for a running job and its result retention window. They are never
+  written to Neo4j.
+- Each new job retrieves CVE source data again. Polling reads retained job state. Restarting
+  the API loses pending and retained jobs; those polling URLs then return 404.
 - Runtime diagnostic logs are written below `logs/` and may contain CVE-derived model responses.
   Protect them, apply retention limits, and do not ship them to public storage.
 - Output written with the CLI `--output` option may contain security-analysis data. Treat it as an

@@ -16,7 +16,7 @@ mappings, Neo4j taxonomy storage, FastAPI, and CLI.
 ## Requirements and installation
 
 - Python 3.11+
-- Network access to NVD, MITRE dataset downloads, trusted advisory domains, and FH Genie
+- Network access to NVD, OpenCVE, MITRE dataset downloads, trusted advisory domains, and FH Genie
 - Docker with Compose for the local Neo4j service
 
 ```bash
@@ -39,8 +39,9 @@ higher rate limits. Never commit `.env`.
 Exploit extraction defaults to FH Genie MiniMax with `INFERENCE_PROVIDER=fh_genie`. To switch
 extraction back to OpenRouter, set `INFERENCE_PROVIDER=openrouter` and configure
 `OPENROUTER_KEY`, `OPENROUTER_BASE_URL`, and `OPENROUTER_MODEL`. ATT&CK retrieval, reranking,
-mapping, and CTID mapping continue to use FH Genie. Advisory preprocessing and compression also
-always use FH Genie MiniMax, so OpenRouter receives only the compact attack-relevant passage.
+mapping, and CTID mapping continue to use FH Genie. Advisory preprocessing and compression use FH Genie MiniMax when the advisory fallback
+is needed. OpenRouter then receives the compact attack-relevant passage; on the default
+description-only first pass, it receives the description directly.
 Extracted actions are canonicalized into atomic, attacker-controlled behaviors, and vector
 retrieval embeds those actions directly. There is no additional LLM query-normalization stage.
 CTID-only mode still normalizes the CVE description into role-specific behaviors before retrieval.
@@ -80,12 +81,52 @@ curl -X POST http://127.0.0.1:8000/api/cve-analysis \
   -d '{"cve_ids":["CVE-2026-22306","CVE-2025-0282"]}'
 ```
 
-The default response is a JSON array containing one result per requested CVE, in the same order as
-`cve_ids`. Each result contains `cve_id`, `attack_chain`, and `ctid_map`. Every chain step has the
-required `step`, `action`, `tactic_id`, `technique_id`, `confidence`, and `mapped` fields; IDs are
-null when `mapped` is false. `ctid_map` contains `exploitation_techniques`, `primary_impacts`, and
-`secondary_impacts`. The request must contain at least one CVE ID. Use `?compact=false` only when
-the complete in-memory analysis, including source advisories and evidence, is required.
+The POST returns HTTP 202 immediately:
+
+```json
+{"job_id":"<uuid>","status":"pending","poll_url":"/api/cve-analysis/<uuid>"}
+```
+
+Poll the returned URL with GET. It returns `pending` until every CVE in the batch
+has finished; polling never starts another analysis. `Retry-After: 3` suggests
+waiting three seconds between polls. The completed response is:
+
+```json
+{"job_id":"<uuid>","status":"completed","poll_url":"/api/cve-analysis/<uuid>","results":[]}
+```
+
+`results` contains one analysis per requested CVE in input order. The default
+compact analysis has `cve_id`, `attack_chain`, and `ctid_map`. Chain steps retain
+`step`, `action`, `tactic_id`, `technique_id`, `confidence`, and `mapped`; IDs are
+null when unmapped. Use `?compact=false` on the initial POST to retain full
+advisories, evidence, and internal analysis in the completed result.
+A failed batch returns `status: "failed"` and an `error` with `code` and `message`;
+no partial results are published. Invalid IDs are rejected before a job is created.
+Each POST creates a new job; clients should keep polling its URL rather than
+resubmitting the batch.
+
+Jobs are held in process memory. Run one Uvicorn worker; restarting the server
+clears jobs. Completed/failed jobs expire one hour after finishing, then GET
+returns 404. Configure `ANALYSIS_JOB_RETENTION_SECONDS`, `ANALYSIS_JOB_CAPACITY`
+(default 100 active or retained jobs), and `ANALYSIS_JOB_CONCURRENCY` (default two
+batches at a time). At capacity, new POST requests return 503. Queued jobs also
+report `pending`. CVEs within each batch are processed in input order.
+
+The default `description_source` is `auto`: fetch the OpenCVE description first
+and extract directly without advisory fetching or compression when it explains
+a concrete exploit mechanism. A conservative deterministic screen routes title-only
+or generic-impact descriptions to advisories first. An empty description extraction
+also triggers advisory retrieval, followed by extraction only if new advisory evidence
+was fetched. If a sparse description has no available advisories, extraction is
+skipped with a warning. Failed model calls are not retried by this fallback. If OpenCVE is
+unavailable, auto mode uses the authoritative normalized description before applying
+the same checks. Missing steps and fallback reasons appear in the full-result warnings.
+This screen routes evidence; it does not establish semantic accuracy.
+
+To explicitly choose either comparison path, include `"description_source": "opencve"`
+or `"description_source": "advisories"` in the POST body. OpenCVE-only mode has no
+advisory fallback. Dedicated CTID-only mode retains its authoritative-description
+workflow and requires the default `auto` request setting.
 
 Each entry in `attack_mappings` contains exactly the step/action, nullable technique and
 tactic IDs, evidence-grounded reasoning, confidence, and supporting evidence IDs. A step
@@ -138,21 +179,24 @@ mypy app
 
 NVD is the primary per-CVE API. The official CVE List V5 repository supplies each requested
 record live as fallback and supplementary data; CVE.org HTML is never scraped and CVEs are never
-bulk-downloaded. The service reads at most two successfully fetched advisories per CVE, prioritizing
-vendor sources and deprioritizing exploit mirrors. Untagged references require a configured
+bulk-downloaded. When advisory evidence is needed, the service reads at most two
+successfully fetched advisories per CVE, prioritizing vendor sources and deprioritizing exploit mirrors. Untagged references require a configured
 allowlisted domain. Advisory requests reject private networks, revalidate redirects, and enforce
 content and size limits.
 
 Neo4j stores only the pinned Enterprise ATT&CK matrix. CVE records, advisory content, evidence,
-exploit steps, mappings, validation results, and CTID results exist only in request memory and are
-released after the response is produced. Every request fetches current CVE source data; no
-per-CVE record or analysis is retained in the database.
+exploit steps, mappings, validation results, and CTID results remain in process memory
+while their job runs and until its retained result expires.
+Each new job fetches current CVE source data; polling reads only the job state. No
+per-CVE record or analysis is retained in Neo4j.
 
-The service removes advisory boilerplate, unrelated CVEs, and duplicate passages before FH Genie
+When the advisory path is used, the service removes advisory boilerplate, unrelated
+CVEs, and duplicate passages before FH Genie
 MiniMax compresses the evidence into a short chronological attack passage. The selected extraction
 provider receives that passage; with `INFERENCE_PROVIDER=openrouter`, this is the only stage that
-uses Claude. Original advisory text remains request-local and is used to attach exact evidence to
-the extracted steps. Description evidence is included as fallback when an advisory is unavailable.
+uses Claude. Original advisory text remains local to the running analysis and is used
+to attach exact evidence to the extracted steps. Description evidence is retained
+alongside any retrieved advisory evidence.
 No CWE/CAPEC relationship is generated by the model.
 
 Enterprise ATT&CK 19.1 techniques and tactics are loaded from the pinned official STIX bundle.

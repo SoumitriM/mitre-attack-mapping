@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     nvd_api_key: str | None = None
     http_timeout_seconds: float = Field(default=15.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0, le=10)
+    analysis_job_retention_seconds: float = Field(default=3600, gt=0)
+    analysis_job_capacity: int = Field(default=100, ge=1)
+    analysis_job_concurrency: int = Field(default=2, ge=1)
     mapping_min_confidence: float = Field(default=0.50, ge=0, le=1)
     enable_ctid_mapping: bool = True
     ctid_only_mode: bool = False

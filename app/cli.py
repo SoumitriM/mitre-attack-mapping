@@ -28,7 +28,7 @@ def root() -> None:
 
 
 async def _analyze_many(
-    cve_ids: list[str], description_source: Literal["advisories", "opencve"] = "advisories"
+    cve_ids: list[str], description_source: Literal["auto", "advisories", "opencve"] = "auto"
 ) -> list[dict[str, object]]:
     settings = get_settings()
     if settings.neo4j_password is None:
@@ -128,8 +128,8 @@ def analyze(
         typer.Option(help="Write pretty-printed batch JSON to this file"),
     ] = None,
     description_source: Annotated[
-        str, typer.Option(help="Evidence source: advisories or opencve (no compression)")
-    ] = "advisories",
+        str, typer.Option(help="Evidence source: auto (description first), advisories, or opencve")
+    ] = "auto",
     full: Annotated[
         bool,
         typer.Option(help="Include advisories, evidence, and internal analysis fields"),
@@ -137,10 +137,12 @@ def analyze(
 ) -> None:
     """Analyze one or more CVEs and print them as one JSON array."""
     try:
-        if description_source not in {"advisories", "opencve"}:
-            raise ValueError("description-source must be advisories or opencve")
+        if description_source not in {"auto", "advisories", "opencve"}:
+            raise ValueError("description-source must be auto, advisories or opencve")
         records = asyncio.run(
-            _analyze_many(cve_ids, cast(Literal["advisories", "opencve"], description_source))
+            _analyze_many(
+                cve_ids, cast(Literal["auto", "advisories", "opencve"], description_source)
+            )
         )
     except (ValueError, RuntimeError) as exc:
         typer.echo(str(exc), err=True)

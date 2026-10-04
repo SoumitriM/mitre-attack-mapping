@@ -1,12 +1,13 @@
-from typing import cast
+from typing import Literal, cast
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from app.analysis import CVEAnalysisService
+from app.api.jobs import AnalysisJobs, DescriptionSource, JobSnapshot
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.candidate_retrieval import EmbeddingClient, RerankClient
@@ -29,6 +30,7 @@ class AnalyzeRequest(BaseModel):
         min_length=1,
         examples=[["CVE-2026-22306", "CVE-2025-0282"]],
     )
+    description_source: DescriptionSource = "auto"
 
 
 class CompactAttackStep(BaseModel):
@@ -114,20 +116,99 @@ def ctid_only_view(result: CVEAnalysis) -> CTIDOnlyAnalysis:
     return CTIDOnlyAnalysis(ctid_map=compact_ctid_map(result))
 
 
+class AnalysisJobError(BaseModel):
+    code: int
+    message: str
+
+
+class PendingAnalysisJob(BaseModel):
+    job_id: str
+    status: Literal["pending"] = "pending"
+    poll_url: str
+
+
+class CompletedAnalysisJob(BaseModel):
+    job_id: str
+    status: Literal["completed"] = "completed"
+    poll_url: str
+    results: list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis]
+
+
+class FailedAnalysisJob(BaseModel):
+    job_id: str
+    status: Literal["failed"] = "failed"
+    poll_url: str
+    error: AnalysisJobError
+
+
+AnalysisJobResponse = PendingAnalysisJob | CompletedAnalysisJob | FailedAnalysisJob
+
+
+def job_response(snapshot: JobSnapshot) -> AnalysisJobResponse:
+    poll_url = f"/api/cve-analysis/{snapshot.job_id}"
+    if snapshot.status == "completed":
+        return CompletedAnalysisJob.model_validate(
+            {"job_id": snapshot.job_id, "poll_url": poll_url, "results": snapshot.results}
+        )
+    if snapshot.status == "failed":
+        return FailedAnalysisJob(
+            job_id=snapshot.job_id, poll_url=poll_url,
+            error=AnalysisJobError(
+                code=snapshot.error_code or 500,
+                message=snapshot.error_message or "Analysis failed",
+            ),
+        )
+    return PendingAnalysisJob(job_id=snapshot.job_id, poll_url=poll_url)
+
+
 @router.post(
-    "/cve-analysis",
-    response_model=list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis],
+    "/cve-analysis", status_code=202,
+    response_model=AnalysisJobResponse,
 )
 async def analyze(
-    request: AnalyzeRequest, compact: bool = True
-) -> list[CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis]:
+    request: AnalyzeRequest, http_request: Request, response: Response, compact: bool = True
+) -> AnalysisJobResponse:
     settings = get_settings()
     if settings.neo4j_password is None:
         raise HTTPException(status_code=503, detail="Neo4j is not configured")
+    if settings.ctid_only_mode and request.description_source != "auto":
+        raise HTTPException(
+            status_code=422, detail="CTID-only mode requires description_source=auto"
+        )
     try:
         cve_ids = [normalize_cve_id(cve_id) for cve_id in request.cve_ids]
     except InvalidCVEID as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    jobs = cast(AnalysisJobs, http_request.app.state.analysis_jobs)
+    result = job_response(jobs.submit(cve_ids, compact, request.description_source))
+    response.headers["Location"] = result.poll_url
+    response.headers["Retry-After"] = "3"
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.get(
+    "/cve-analysis/{job_id}",
+    response_model=AnalysisJobResponse,
+)
+async def poll_analysis(
+    job_id: str, http_request: Request, response: Response
+) -> AnalysisJobResponse:
+    jobs = cast(AnalysisJobs, http_request.app.state.analysis_jobs)
+    result = job_response(jobs.get(job_id))
+    response.headers["Cache-Control"] = "no-store"
+    if result.status == "pending":
+        response.headers["Retry-After"] = "3"
+    return result
+
+
+async def run_analysis_batch(
+    cve_ids: list[str], compact: bool, description_source: DescriptionSource
+) -> list[dict[str, object]]:
+    settings = get_settings()
+    if settings.neo4j_password is None:
+        raise HTTPException(status_code=503, detail="Neo4j is not configured")
+    owned_clients: list[AsyncOpenAI] = []
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_username, settings.neo4j_password.get_secret_value()),
@@ -150,12 +231,16 @@ async def analyze(
                         base_url=settings.fh_genie_base_url,
                     ),
                 )
+                owned_clients = [cast(AsyncOpenAI, downstream_client)]
                 agent = None
                 mapper = None
                 ctid_mapper = FHGenieCTIDCVEMapper(settings.fh_genie_model, downstream_client)
             else:
                 agent = FHGenieEvidenceAgent(settings)
                 downstream_client = agent.downstream_client
+                owned_clients = [
+                    cast(AsyncOpenAI, agent.client), cast(AsyncOpenAI, downstream_client)
+                ]
                 mapper = FHGenieAttackMapper(settings, downstream_client)
                 ctid_mapper = (
                     FHGenieCTIDCVEMapper(mapper.model, downstream_client)
@@ -180,15 +265,15 @@ async def analyze(
             service = CVEAnalysisService(
                 settings, graph, client, agent, mapper, ctid_mapper
             )
-            results = [await service.analyze(cve_id) for cve_id in cve_ids]
-            if settings.ctid_only_mode:
-                return [ctid_only_view(result) for result in results]
-            if compact:
-                return [compact_analysis_view(result) for result in results]
-            return [
-                cast(CVEAnalysis | CompactCVEAnalysis | CTIDOnlyAnalysis, result)
-                for result in results
+            results = [
+                await service.analyze(cve_id, description_source=description_source)
+                for cve_id in cve_ids
             ]
+            if settings.ctid_only_mode:
+                return [ctid_only_view(result).model_dump(mode="json") for result in results]
+            if compact:
+                return [compact_analysis_view(result).model_dump(mode="json") for result in results]
+            return [result.model_dump(mode="json") for result in results]
     except InvalidCVEID as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CVENotAvailable as exc:
@@ -198,4 +283,8 @@ async def analyze(
     except GraphUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
-        await driver.close()
+        try:
+            await driver.close()
+        finally:
+            for inference_client in {id(item): item for item in owned_clients}.values():
+                await inference_client.close()
