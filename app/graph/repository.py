@@ -169,6 +169,21 @@ class GraphRepository:
         except Exception as exc:
             raise GraphUnavailable("Neo4j taxonomy check failed") from exc
 
+    async def attack_names(self, ids: list[str]) -> dict[str, str]:
+        """Resolve display names by existing IDs without selecting or validating mappings."""
+        if not ids:
+            return {}
+        try:
+            async with self._driver.session() as session:
+                result = await session.run(
+                    "MATCH (n) WHERE (n:AttackTechnique OR n:AttackTactic) "
+                    "AND n.id IN $ids RETURN n.id AS id, n.name AS name",
+                    ids=ids,
+                )
+                return {row["id"]: row["name"] for row in await result.data()}
+        except Exception as exc:
+            raise GraphUnavailable("ATT&CK display-name lookup failed") from exc
+
     async def attack_candidates(
         self,
         step: ExploitStep,

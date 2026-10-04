@@ -198,6 +198,8 @@ class ValidatedAttackStep(BaseModel):
     action: str = Field(min_length=1)
     proposed_technique_id: str | None = None
     mitre_tactic_id: str | None = None
+    technique_name: str | None = None
+    tactic_name: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     validation: ValidationDetails
 
@@ -223,6 +225,8 @@ class CVELevelAttackMapping(BaseModel):
     enabled_by: list[str] = Field(default_factory=list)
     mitre_technique_id: str | None = None
     mitre_tactic_id: str | None = None
+    technique_name: str | None = None
+    tactic_name: str | None = None
     reasoning: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     evidence_ids: list[str] = Field(default_factory=list)

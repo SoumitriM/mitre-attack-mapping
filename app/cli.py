@@ -9,6 +9,7 @@ from neo4j import AsyncGraphDatabase
 from openai import AsyncOpenAI
 
 from app.analysis import CVEAnalysisService
+from app.api.response_names import resolve_attack_names
 from app.api.routes import compact_analysis_view
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
@@ -89,6 +90,7 @@ async def _analyze_many(
                 await service.analyze(cve_id, description_source=description_source)
                 for cve_id in cve_ids
             ]
+        await resolve_attack_names(results, graph)
         return [result.model_dump(mode="json") for result in results]
     finally:
         await driver.close()

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.analysis import CVEAnalysisService
 from app.api.jobs import AnalysisJobs, DescriptionSource, JobSnapshot
+from app.api.response_names import resolve_attack_names
 from app.config import get_settings
 from app.enrichment.attack_mapper import FHGenieAttackMapper
 from app.enrichment.candidate_retrieval import EmbeddingClient, RerankClient
@@ -38,6 +39,8 @@ class CompactAttackStep(BaseModel):
     action: str
     technique_id: str | None
     tactic_id: str | None
+    technique_name: str | None = None
+    tactic_name: str | None = None
     confidence: float
     mapped: bool
 
@@ -47,6 +50,8 @@ class CompactCTIDTechnique(BaseModel):
     action: str
     technique_id: str | None
     tactic_id: str | None
+    technique_name: str | None = None
+    tactic_name: str | None = None
     status: MappingProcessingStatus
 
 
@@ -77,6 +82,8 @@ def compact_ctid_map(result: CVEAnalysis) -> CompactCTIDMap:
             "action": item.action,
             "technique_id": item.mitre_technique_id,
             "tactic_id": item.mitre_tactic_id,
+            "technique_name": item.technique_name,
+            "tactic_name": item.tactic_name,
             "status": item.processing_status,
         }
         if linked:
@@ -102,6 +109,8 @@ def compact_analysis_view(result: CVEAnalysis) -> CompactCVEAnalysis:
                 action=item.action,
                 technique_id=item.proposed_technique_id,
                 tactic_id=item.mitre_tactic_id,
+                technique_name=item.technique_name,
+                tactic_name=item.tactic_name,
                 confidence=item.validation.validator_confidence,
                 mapped=item.validation.status
                 in {ValidationStatus.MAPPED, ValidationStatus.VALIDATED},
@@ -269,6 +278,7 @@ async def run_analysis_batch(
                 await service.analyze(cve_id, description_source=description_source)
                 for cve_id in cve_ids
             ]
+            await resolve_attack_names(results, graph)
             if settings.ctid_only_mode:
                 return [ctid_only_view(result).model_dump(mode="json") for result in results]
             if compact:

@@ -138,6 +138,8 @@ def test_compact_analysis_view_contains_only_mapping_views() -> None:
             "action": "Execute payload",
             "technique_id": None,
             "tactic_id": None,
+            "technique_name": None,
+            "tactic_name": None,
             "confidence": 0.0,
             "mapped": False,
         }
