@@ -56,6 +56,25 @@ def test_default_acceptance_threshold_is_half() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("candidates", [{}, {1: []}])
+async def test_empty_candidates_skip_model_call(candidates) -> None:
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock()
+    item = step()
+
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(cve(), [item], candidates)
+
+    api.chat.completions.create.assert_not_awaited()
+    assert len(mappings) == 1
+    assert mappings[0].step == item.step
+    assert mappings[0].action == item.action
+    assert mappings[0].mitre_technique_id is None
+    assert mappings[0].mitre_tactic_id is None
+    assert mappings[0].confidence == 0.0
+    assert mappings[0].evidence_ids == []
+
+
+@pytest.mark.asyncio
 async def test_accepts_mapping_at_acceptance_threshold() -> None:
     item = step()
     ev_id = evidence_id(str(item.evidence[0].source_url), item.evidence[0].supporting_text)
@@ -134,9 +153,13 @@ async def test_accepts_explicit_low_confidence_no_match() -> None:
         '"reasoning":"No candidate fits.","confidence":0.2,"evidence_ids":[]}]}'
     ))
 
-    mappings = await FHGenieAttackMapper(settings(), api).map_steps(cve(), [step()], {1: []})
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(
+        cve(), [step()], {1: [candidate()]}
+    )
 
     assert mappings[0].mitre_technique_id is None
+    assert mappings[0].confidence == 0.2
+    api.chat.completions.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio

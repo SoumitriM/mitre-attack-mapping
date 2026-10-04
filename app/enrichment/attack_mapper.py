@@ -422,6 +422,17 @@ class FHGenieAttackMapper:
                 },
             )
 
+            if not step_candidates and not schema_only:
+                mappings.append(
+                    AttackMapping(
+                        step=step.step,
+                        action=step.action,
+                        reasoning="No ATT&CK candidates were available for this step.",
+                        confidence=0.0,
+                    )
+                )
+                continue
+
             try:
                 mapping = await self._map_single_step(
                     cve,
