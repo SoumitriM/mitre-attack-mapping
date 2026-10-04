@@ -54,7 +54,7 @@ Submit the two CVEs:
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/api/cve-analysis \
   -H 'Content-Type: application/json' \
-  -d '{"cve_ids":["CVE-2026-33557","CVE-2026-57112"],"description_source":"auto"}'
+  -d '{"cve_ids":["CVE-2026-33557","CVE-2026-57112"]}'
 ```
 
 The API immediately returns HTTP 202:
@@ -97,6 +97,63 @@ expire after `ANALYSIS_JOB_RETENTION_SECONDS` (default 3600); expired IDs return
 `ANALYSIS_JOB_CAPACITY` defaults to 100, and new submissions return 503 at capacity.
 `ANALYSIS_JOB_CONCURRENCY` defaults to two simultaneous batches. CVEs within a batch
 run sequentially. Pending polls include `Retry-After: 3`.
+
+## Frontend team handoff
+
+Run these commands from the cloned repository root. For a first-time setup:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+cp .env.example .env
+```
+
+Populate `FH_GENIE_KEY`, `FH_GENIE_BASE_URL`, `NEO4J_PASSWORD`, and
+`NEO4J_URI=bolt://127.0.0.1:7688` in `.env` before continuing:
+
+```bash
+docker compose up -d neo4j
+python -m app.data.sync_mitre
+python -m app.cli initialize-attack-embedding-cache
+```
+
+For subsequent starts, reuse the configured environment and database:
+
+```bash
+source .venv/bin/activate
+docker compose up -d neo4j
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Use `http://localhost:8000` when the frontend runs on the same machine, or
+`http://<backend-host>:8000` when it runs elsewhere. `0.0.0.0` is the listening
+address, not the URL to use in the frontend.
+
+| Purpose | Method | Path |
+| --- | --- | --- |
+| Check liveness | GET | `/healthz` |
+| Submit a CVE batch | POST | `/api/cve-analysis` |
+| Poll an existing job | GET | `/api/cve-analysis/{job_id}` |
+| Explore API documentation | GET | `/docs` |
+
+Send `Content-Type: application/json` with this POST body:
+
+```json
+{"cve_ids":["CVE-2026-33557","CVE-2026-57112"]}
+```
+
+Store `job_id` and `poll_url` from the HTTP 202 response. Poll `poll_url` against
+the same backend every three seconds (or follow `Retry-After`). Continue on
+`pending`, render `results` on `completed`, and show `error.message` on `failed`.
+Stop polling after completion or failure. A 404 means the job is unknown or expired;
+a server restart also loses jobs. Submit once per user request rather than POSTing
+again during polling. The default `results` format is the compact fixture linked above.
+
+For browser integration, configure the frontend development server or reverse proxy
+to forward `/api` requests to this backend. The API currently has no CORS middleware,
+so direct requests from a different browser origin require proxying or explicit CORS
+configuration. Keep provider and database credentials on the backend.
 
 ## CLI
 

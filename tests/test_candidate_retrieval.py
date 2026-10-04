@@ -309,9 +309,22 @@ def test_retrieval_log_contains_both_stages(tmp_path, monkeypatch) -> None:
 
 
 def test_rerank_prompt_requires_semantic_fit_and_specificity() -> None:
+    assert "OUTPUT THE JSON OBJECT IMMEDIATELY" in RERANK_SYSTEM_PROMPT
+    assert "Perform any comparison silently" in RERANK_SYSTEM_PROMPT
+    assert "APPLY THESE HARD GATES BEFORE COMPARING SIMILARITY" in RERANK_SYSTEM_PROMPT
+    assert '"administrator privileges" does' in RERANK_SYSTEM_PROMPT
+    assert "not establish an account, credential, login, token" in RERANK_SYSTEM_PROMPT
+    assert "Scores must obey these caps; they are not optional guidance" in RERANK_SYSTEM_PROMPT
+    assert "exactly one sentence of at most 24 words" in RERANK_SYSTEM_PROMPT
+    assert "Start the response with `{` and end it with `}`" in RERANK_SYSTEM_PROMPT
     assert "prefer the most specific" in RERANK_SYSTEM_PROMPT
     assert "POSITIVE FIT" in RERANK_SYSTEM_PROMPT
     assert "NEGATIVE FIT" in RERANK_SYSTEM_PROMPT
     assert "score the technique <= 0.20" in RERANK_SYSTEM_PROMPT
     assert "materially different context" in RERANK_SYSTEM_PROMPT
+    assert "Rank the action performed in THIS step" in RERANK_SYSTEM_PROMPT
+    assert "a firewall appliance is not" in RERANK_SYSTEM_PROMPT
+    assert "deployment context that is not stated, score it <= 0.20" in RERANK_SYSTEM_PROMPT
+    assert "do not by themselves\n  prove use of valid account credentials" in RERANK_SYSTEM_PROMPT
+    assert "explicit account modification for Account Manipulation" in RERANK_SYSTEM_PROMPT
     assert "compound" not in RERANK_SYSTEM_PROMPT.lower()
