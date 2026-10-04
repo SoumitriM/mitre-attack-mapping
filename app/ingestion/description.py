@@ -1,24 +1,11 @@
-"""Conservative screening for descriptions that explain an exploit mechanism."""
-
-import re
-
-# This is an evidence-routing heuristic, not a semantic accuracy validator.
-_MECHANISM = re.compile(
-    r"jndi|data binding|command injection|authentication bypass|"
-    r"privilege escalation|buffer overflow|stack[- ]based|heap[- ]based|"
-    r"sql injection|path traversal|directory traversal|deserializ|"
-    r"url protocol|unc path|ntlm|session (?:cookie|token)|"
-    r"malicious code.{0,100}tarballs|tarballs.{0,100}malicious code|"
-    r"build process.{0,100}(?:object file|malicious)",
-    re.IGNORECASE | re.DOTALL,
-)
-_CONTEXT = re.compile(
-    r"attacker|administrator|crafted|requests?|parameters?|execute|execution|"
-    r"gain|obtain|leak|arbitrary|malicious code|library|privileges|credentials",
-    re.IGNORECASE,
-)
+"""Basic length screening for description-first extraction."""
 
 
-def description_has_exploit_behavior(text: str | None) -> bool:
-    """Reject title-only and generic-impact descriptions before inference."""
-    return bool(text and _MECHANISM.search(text) and _CONTEXT.search(text))
+def description_is_substantive(text: str | None) -> bool:
+    """Attempt extraction from descriptions with at least eight whitespace-separated words.
+
+    This only filters empty and very short text. The extractor determines whether
+    the description supplies evidence for exploit steps; no mechanism vocabulary
+    is required.
+    """
+    return bool(text and len(text.split()) >= 8)

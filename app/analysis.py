@@ -25,7 +25,7 @@ from app.enrichment.fh_genie import (
     normalized_description_evidence,
 )
 from app.graph.repository import GraphRepository, GraphUnavailable
-from app.ingestion.description import description_has_exploit_behavior
+from app.ingestion.description import description_is_substantive
 from app.ingestion.opencve import fetch_opencve_description
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
 from app.models import (
@@ -155,11 +155,11 @@ class CVEAnalysisService:
         )
         use_advisories = description_source == "advisories" or (
             description_source == "auto"
-            and not description_has_exploit_behavior(description.text if description else None)
+            and not description_is_substantive(description.text if description else None)
         )
         if use_advisories:
             if description_source == "auto":
-                warnings.append("Description lacks a concrete exploit mechanism; using advisories")
+                warnings.append("Description is empty or too short; using advisories")
             fetched, results, advisory_warnings = await self._fetch_advisories(cve)
             warnings.extend(advisory_warnings)
 

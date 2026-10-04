@@ -7,7 +7,7 @@ import pytest
 from app.analysis import CVEAnalysisService
 from app.config import Settings
 from app.enrichment.fh_genie import DescriptionEvidence, ExtractionResponseError
-from app.ingestion.description import description_has_exploit_behavior
+from app.ingestion.description import description_is_substantive
 from app.models import CVERecord, ExploitStep, SourceAttribution
 
 RICH = (
@@ -22,18 +22,22 @@ RICH = (
     "Malicious code was discovered in the upstream tarballs of xz.",
     "A privilege escalation allows an administrator to perform actions with root privileges.",
     "A Spring MVC application permits remote code execution via data binding.",
+    "Sensitive information disclosure in NetScaler Gateway when configured as a Gateway.",
+    "A critical issue impacts many versions. Install the security update immediately.",
+    "An attacker generates a JWT with an arbitrary preferred_username; the broker accepts "
+    "it without validating its signature, issuer, or audience.",
+    "A malicious website uses DNS rebinding to enumerate registered tools on an internal "
+    "SSE server and invoke them with the server user's privileges.",
 ])
-def test_accepts_descriptions_with_exploit_mechanisms(text):
-    assert description_has_exploit_behavior(text)
+def test_accepts_substantive_descriptions_without_mechanism_keywords(text):
+    assert description_is_substantive(text)
 
 
 @pytest.mark.parametrize("text", [
-    None, "", "Microsoft Outlook Elevation of Privilege Vulnerability",
-    "Sensitive information disclosure in NetScaler Gateway when configured as a Gateway.",
-    "A critical issue impacts many versions. Install the security update immediately.",
+    None, "", "   ", "Title only", "Microsoft Outlook Elevation of Privilege Vulnerability",
 ])
-def test_rejects_title_only_and_generic_descriptions(text):
-    assert not description_has_exploit_behavior(text)
+def test_rejects_empty_and_very_short_descriptions(text):
+    assert not description_is_substantive(text)
 
 
 @pytest.fixture
@@ -142,3 +146,23 @@ async def test_sparse_description_without_advisories_skips_inference(service, mo
     service.agent.extract.assert_not_awaited()
     assert not result.exploit_steps
     assert any("extraction was skipped" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("text", [
+    "An attacker generates a JWT with an arbitrary preferred_username; the broker accepts "
+    "it without validating its signature, issuer, or audience.",
+    "A malicious website uses DNS rebinding to enumerate registered tools on an internal "
+    "SSE server and invoke them with the server user's privileges.",
+])
+@pytest.mark.asyncio
+async def test_unlisted_mechanisms_attempt_extraction_without_advisories(
+    service, monkeypatch, text
+):
+    monkeypatch.setattr("app.analysis.fetch_opencve_description", AsyncMock(return_value=(
+        DescriptionEvidence("OpenCVE", "https://app.opencve.io/cve/CVE-2024-21887", text)
+    )))
+    result = await service.analyze("CVE-2024-21887")
+    service._fetch_advisories.assert_not_awaited()
+    service.agent.extract.assert_awaited_once()
+    assert service.agent.extract.call_args.args[2].text == text
+    assert result.exploit_steps
