@@ -122,6 +122,9 @@ async def test_unmapped_source_behavior_remains_unmapped_in_every_role():
     chain = attack_chain_from_mappings(steps, mappings)
     ctid, _ = mapper_for(payload(steps))
     result = await ctid.map(CVERecord(cve_id="CVE-2026-57112"), steps, chain, mappings)
+    assert len(result.exploitation_techniques) == 1
+    assert len(result.primary_impacts) == 1
+    assert len(result.secondary_impacts) == 1
     for item in [*result.exploitation_techniques, *result.primary_impacts,
                  *result.secondary_impacts]:
         assert item.mitre_technique_id is None
@@ -362,3 +365,63 @@ async def test_sequence_et_with_no_primary_source_still_has_causal_nodes():
     assert result.exploitation_techniques[0].mitre_technique_id is None
     assert result.primary_impacts[0].enabled_by == ['ET-1']
     assert result.secondary_impacts[0].enabled_by == ['PI-1']
+
+
+@pytest.mark.parametrize('role', ['primary_impacts', 'secondary_impacts'])
+@pytest.mark.asyncio
+async def test_impacts_cannot_reuse_et_source_even_when_action_matches(role):
+    steps, mappings, chain = sources()
+    data = payload(steps)
+    data[role][0].update(source_step=1, supporting_steps=[1], action=steps[0].action)
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id='CVE-2026-33557'), steps, chain, mappings)
+    impact = getattr(result, role)[0]
+    assert impact.mitre_technique_id is None
+    assert impact.mitre_tactic_id is None
+    assert impact.confidence == 0.0
+    assert impact.enabled_by == data[role][0]['enabled_by']
+    assert impact.evidence_ids
+    assert result.exploitation_techniques[0].mitre_technique_id == 'T1190'
+
+
+@pytest.mark.asyncio
+async def test_secondary_impact_cannot_reuse_primary_behavior_mapping():
+    steps, mappings, chain = sources()
+    data = payload(steps)
+    data['secondary_impacts'][0].update(
+        source_step=2, supporting_steps=[2], action=steps[1].action,
+    )
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id='CVE-2026-33557'), steps, chain, mappings)
+    assert result.primary_impacts[0].mitre_technique_id == 'T1059'
+    assert result.secondary_impacts[0].mitre_technique_id is None
+    assert result.secondary_impacts[0].enabled_by == ['PI-1']
+
+
+@pytest.mark.parametrize('role', ['primary_impacts', 'secondary_impacts'])
+@pytest.mark.asyncio
+async def test_summarized_outcomes_do_not_inherit_referenced_behavior_mapping(role):
+    steps, mappings, chain = sources()
+    data = payload(steps)
+    data[role][0]['action'] = 'Security capability obtained as a consequence'
+    ctid, _ = mapper_for(data)
+    result = await ctid.map(CVERecord(cve_id='CVE-2026-33557'), steps, chain, mappings)
+    impact = getattr(result, role)[0]
+    assert impact.action == data[role][0]['action']
+    assert impact.mitre_technique_id is None
+    assert impact.mitre_tactic_id is None
+    assert impact.evidence_ids
+
+
+@pytest.mark.asyncio
+async def test_distinct_behaviors_can_share_technique_ids_without_inheriting():
+    steps, mappings, _ = sources()
+    for mapping in mappings:
+        mapping.mitre_technique_id = 'T1606'
+        mapping.mitre_tactic_id = 'TA0006'
+    chain = attack_chain_from_mappings(steps, mappings)
+    ctid, _ = mapper_for(payload(steps))
+    result = await ctid.map(CVERecord(cve_id='CVE-2026-33557'), steps, chain, mappings)
+    for impact in [result.primary_impacts[0], result.secondary_impacts[0]]:
+        assert impact.mitre_technique_id == 'T1606'
+        assert impact.mitre_tactic_id == 'TA0006'

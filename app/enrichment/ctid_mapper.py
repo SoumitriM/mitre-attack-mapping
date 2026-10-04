@@ -309,9 +309,24 @@ class FHGenieCTIDCVEMapper:
 
         chain_by_step = {item.step: item for item in attack_chain}
         evidence_by_step = {item.step: item.evidence for item in steps}
+        et_sources = {item.source_step for item in envelope.exploitation_techniques}
+        pi_sources = {item.source_step for item in envelope.primary_impacts}
 
-        def convert(node: CTIDCausalNode) -> CVELevelAttackMapping:
+        def convert(
+            node: CTIDCausalNode,
+            *,
+            impact: bool = False,
+            used_sources: set[int | None] | None = None,
+        ) -> CVELevelAttackMapping:
             source = chain_by_step.get(node.source_step) if node.source_step is not None else None
+            # Impact summaries cannot borrow an exploitation mapping. Reuse requires
+            # an explicitly identified, distinct source behavior, copied verbatim.
+            # This is source identity checking, not ATT&CK semantic matching.
+            if impact and source and (
+                source.step in (used_sources or set()) or node.action != source.action
+            ):
+                source = None
+            # Always construct the node, including when its source is unmapped.
             return CVELevelAttackMapping(
                 id=node.id,
                 action=node.action,
@@ -332,6 +347,12 @@ class FHGenieCTIDCVEMapper:
 
         return CVELevelAttackMappings(
             exploitation_techniques=[convert(node) for node in envelope.exploitation_techniques],
-            primary_impacts=[convert(node) for node in envelope.primary_impacts],
-            secondary_impacts=[convert(node) for node in envelope.secondary_impacts],
+            primary_impacts=[
+                convert(node, impact=True, used_sources=et_sources)
+                for node in envelope.primary_impacts
+            ],
+            secondary_impacts=[
+                convert(node, impact=True, used_sources=et_sources | pi_sources)
+                for node in envelope.secondary_impacts
+            ],
         )
