@@ -12,7 +12,17 @@ build/
 .env
 data/raw/
 data/manifest.json
+data/cache/
 .neo4j/
 .env.configure.tmp
 .DS_Store
 logs/
+output/
+
+# Generated analysis inputs/results; the reviewed API fixture stays tracked.
+/input/
+/inputs/
+/outputs/
+/out/
+/[Cc][Vv][Ee]-*-output.json
+/test-cve-*.json

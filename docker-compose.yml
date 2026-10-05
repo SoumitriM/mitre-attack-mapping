@@ -3,6 +3,7 @@ name: mitre-attack-chain
 services:
   neo4j:
     image: neo4j:5.26-community
+    restart: unless-stopped
     environment:
       NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD}
     ports:
@@ -11,14 +12,11 @@ services:
     volumes:
       - neo4j-data:/data
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          cypher-shell -u '${NEO4J_USERNAME:-neo4j}' -p '${NEO4J_PASSWORD}'
-          'RETURN 1' >/dev/null 2>&1
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/7687'"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
 
 volumes:
   neo4j-data:

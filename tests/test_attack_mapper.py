@@ -56,6 +56,25 @@ def test_default_acceptance_threshold_is_half() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("candidates", [{}, {1: []}])
+async def test_empty_candidates_skip_model_call(candidates) -> None:
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock()
+    item = step()
+
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(cve(), [item], candidates)
+
+    api.chat.completions.create.assert_not_awaited()
+    assert len(mappings) == 1
+    assert mappings[0].step == item.step
+    assert mappings[0].action == item.action
+    assert mappings[0].mitre_technique_id is None
+    assert mappings[0].mitre_tactic_id is None
+    assert mappings[0].confidence == 0.0
+    assert mappings[0].evidence_ids == []
+
+
+@pytest.mark.asyncio
 async def test_accepts_mapping_at_acceptance_threshold() -> None:
     item = step()
     ev_id = evidence_id(str(item.evidence[0].source_url), item.evidence[0].supporting_text)
@@ -75,6 +94,7 @@ async def test_accepts_mapping_at_acceptance_threshold() -> None:
 
     assert mappings[0].mitre_technique_id == "T1105"
     assert mappings[0].confidence == 0.50
+    assert api.chat.completions.create.await_args.kwargs["max_completion_tokens"] == 4096
 
 
 @pytest.mark.asyncio
@@ -133,6 +153,47 @@ async def test_accepts_explicit_low_confidence_no_match() -> None:
         '"reasoning":"No candidate fits.","confidence":0.2,"evidence_ids":[]}]}'
     ))
 
-    mappings = await FHGenieAttackMapper(settings(), api).map_steps(cve(), [step()], {1: []})
+    mappings = await FHGenieAttackMapper(settings(), api).map_steps(
+        cve(), [step()], {1: [candidate()]}
+    )
 
     assert mappings[0].mitre_technique_id is None
+    assert mappings[0].confidence == 0.2
+    api.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ctid_schema_only_mapping_bypasses_semantic_checks() -> None:
+    import json
+
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response(json.dumps({
+        "mappings": [{
+            "step": 99,
+            "action": "Different action",
+            "mitre_technique_id": "T9999",
+            "mitre_tactic_id": None,
+            "reasoning": "Model selection.",
+            "confidence": 0.99,
+            "evidence_ids": [],
+        }]
+    })))
+    mapper = FHGenieAttackMapper(Settings(fh_genie_model="test-model"), api)
+    result = await mapper.map_steps(cve(), [step()], {1: []}, schema_only=True)
+    assert result[0].mitre_technique_id == "T9999"
+    assert result[0].confidence == 0.99
+    api.chat.completions.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ctid_schema_only_mapping_still_rejects_invalid_field_types() -> None:
+    api = MagicMock()
+    api.chat.completions.create = AsyncMock(return_value=response(
+        '{"mappings":[{"step":1,"action":"Action","reasoning":"Reason",'
+        '"confidence":"invalid"}]}'
+    ))
+    mapper = FHGenieAttackMapper(Settings(fh_genie_model="test-model"), api)
+    result = await mapper.map_steps(cve(), [step()], {1: []}, schema_only=True)
+    assert result[0].mitre_technique_id is None
+    assert "schema validation failed" in result[0].reasoning.lower()
+    assert api.chat.completions.create.await_count == 2

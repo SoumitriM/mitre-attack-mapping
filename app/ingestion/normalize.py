@@ -16,7 +16,8 @@ def _parse_datetime(value: str | None) -> datetime | None:
 
 
 def _english(items: list[dict[str, Any]]) -> str | None:
-    return next((item.get("value") for item in items if item.get("lang") == "en"), None)
+    value = next((item.get("value") for item in items if item.get("lang") == "en"), None)
+    return " ".join(str(value).split()) if value else None
 
 
 def _category(tags: list[str]) -> ReferenceCategory:

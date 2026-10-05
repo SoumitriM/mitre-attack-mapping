@@ -261,7 +261,7 @@ async def test_rejects_low_confidence_mapping_below_threshold() -> None:
 
 @pytest.mark.asyncio
 async def test_enforces_minimum_threshold_in_validator() -> None:
-    """Mapper enforces strict quality threshold via _valid method."""
+    """Mapper enforces strict quality threshold via _valid_single method."""
     mapper = FHGenieAttackMapper(settings(), MagicMock())
 
     # High confidence, valid mapping should pass
@@ -277,16 +277,16 @@ async def test_enforces_minimum_threshold_in_validator() -> None:
         )
     ]
 
-    result = mapper._valid(
-        strong_mapping,
+    result = mapper._valid_single(
+        strong_mapping[0],
         cve(),
-        [step(action="Test action")],
-        {1: [candidate_t1105()]},
-        {1: [{"id": "test-evidence-id-1"}]},
+        step(action="Test action"),
+        [candidate_t1105()],
+        [{"id": "test-evidence-id-1"}],
     )
     assert result is True
 
-    # Low confidence mapping should fail the _valid check
+    # Low confidence mapping should fail the _valid_single check
     weak_mapping = [
         AttackMapping(
             step=1,
@@ -299,12 +299,12 @@ async def test_enforces_minimum_threshold_in_validator() -> None:
         )
     ]
 
-    result = mapper._valid(
-        weak_mapping,
+    result = mapper._valid_single(
+        weak_mapping[0],
         cve(),
-        [step(action="Test action")],
-        {1: [candidate_t1105()]},
-        {1: [{"id": "test-evidence-id-1"}]},
+        step(action="Test action"),
+        [candidate_t1105()],
+        [{"id": "test-evidence-id-1"}],
     )
     assert result is False
 
@@ -321,12 +321,12 @@ async def test_enforces_minimum_threshold_in_validator() -> None:
         )
     ]
 
-    result = mapper._valid(
-        null_low_confidence,
+    result = mapper._valid_single(
+        null_low_confidence[0],
         cve(),
-        [step(action="Test action")],
-        {1: []},
-        {1: []},
+        step(action="Test action"),
+        [],
+        [],
     )
     assert result is True
 
@@ -344,11 +344,11 @@ async def test_enforces_minimum_threshold_in_validator() -> None:
         )
     ]
 
-    result = mapper._valid(
-        null_borderline,
+    result = mapper._valid_single(
+        null_borderline[0],
         cve(),
-        [step(action="Test action")],
-        {1: []},
-        {1: []},
+        step(action="Test action"),
+        [],
+        [],
     )
     assert result is True

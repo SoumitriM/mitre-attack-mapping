@@ -1,39 +1,93 @@
 import asyncio
-import hashlib
 import logging
+from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 
 from app.advisory.client import (
     AdvisoryClient,
     FetchedAdvisory,
-    SelectedReference,
     UnsupportedAdvisoryContent,
     select_references,
 )
+from app.advisory.compression import MAX_SUCCESSFUL_ADVISORIES, advisory_priority
 from app.config import Settings
-from app.enrichment.attack_mapper import (
-    MAPPING_PROMPT_VERSION,
-    FHGenieAttackMapper,
-    MappingResponseError,
+from app.enrichment.attack_mapper import FHGenieAttackMapper, MappingResponseError
+from app.enrichment.ctid_mapper import (
+    CTIDMappingError,
+    FHGenieCTIDCVEMapper,
+    empty_ctid_mappings,
 )
 from app.enrichment.fh_genie import (
-    PROMPT_VERSION,
-    SYSTEM_PROMPT,
     ExtractionResponseError,
     FHGenieEvidenceAgent,
-)
-from app.enrichment.validation_agent import (
-    VALIDATION_PROMPT_VERSION,
-    FHGenieValidationAgent,
-    ValidationResponseError,
-    unvalidated_chain,
+    normalized_description_evidence,
 )
 from app.graph.repository import GraphRepository
+from app.ingestion.description import description_is_substantive
+from app.ingestion.opencve import fetch_opencve_description
 from app.ingestion.service import CVEIngestionService, normalize_cve_id
-from app.models import AdvisoryResult, AttackMapping, CVEAnalysis, ExtractionStatus
+from app.models import (
+    AdvisoryResult,
+    AttackCandidate,
+    AttackMapping,
+    CVEAnalysis,
+    CVERecord,
+    DescriptionEvidenceResult,
+    EvidenceSubgraph,
+    ExploitStep,
+    ExtractionStatus,
+    SourceAttribution,
+    ValidatedAttackStep,
+    ValidationChecks,
+    ValidationDetails,
+    ValidationStatus,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def attack_chain_from_mappings(
+    steps: list[ExploitStep],
+    mappings: list[AttackMapping],
+) -> list[ValidatedAttackStep]:
+    """Present mapping output directly without a second semantic judgment stage."""
+    by_step = {item.step: item for item in mappings}
+    chain: list[ValidatedAttackStep] = []
+    for step in steps:
+        mapping = by_step.get(step.step)
+        mapped = mapping is not None and mapping.mitre_technique_id is not None
+        technique_id = mapping.mitre_technique_id if mapping and mapped else None
+        tactic_id = mapping.mitre_tactic_id if mapping and mapped else None
+        evidence_ids = mapping.evidence_ids if mapping and mapped else []
+        confidence = mapping.confidence if mapping and mapped else 0.0
+        chain.append(
+            ValidatedAttackStep(
+                step=step.step,
+                action=step.action,
+                proposed_technique_id=technique_id,
+                mitre_tactic_id=tactic_id,
+                evidence_ids=evidence_ids,
+                validation=ValidationDetails(
+                    status=(ValidationStatus.MAPPED if mapped else ValidationStatus.UNMAPPED),
+                    checks=ValidationChecks(
+                        technique_exists=mapped,
+                        tactic_valid=mapped,
+                        platform_compatible=mapped,
+                        evidence_support=mapped,
+                        semantic_match=False,
+                    ),
+                    reasoning=(
+                        mapping.reasoning
+                        if mapping is not None
+                        else "No ATT&CK mapping satisfied the configured mapping threshold."
+                    ),
+                    validator_confidence=confidence,
+                ),
+            )
+        )
+    return chain
 
 
 class CVEAnalysisService:
@@ -44,218 +98,213 @@ class CVEAnalysisService:
         client: httpx.AsyncClient,
         agent: FHGenieEvidenceAgent | None = None,
         mapper: FHGenieAttackMapper | None = None,
-        validator: FHGenieValidationAgent | None = None,
+        ctid_mapper: FHGenieCTIDCVEMapper | None = None,
     ) -> None:
         self.settings = settings
         self.graph = graph
         self.client = client
         self.agent = agent
         self.mapper = mapper
-        self.validator = validator
+        self.ctid_mapper = ctid_mapper
 
-    async def analyze(self, cve_id: str) -> CVEAnalysis:
+    async def analyze_opencve(self, cve_id: str) -> CVEAnalysis:
+        """Use only OpenCVE description evidence; skip advisories and compression."""
+        return await self.analyze(cve_id, description_source="opencve")
+
+    async def analyze(
+        self, cve_id: str, *, description_source: Literal["auto", "advisories", "opencve"] = "auto"
+    ) -> CVEAnalysis:
         normalized_id = normalize_cve_id(cve_id)
         await self.graph.verify_taxonomy()
-        cve = await self.graph.cached_cve(normalized_id, self.settings.cache_ttl_seconds)
-        if cve is None:
-            cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
-        selected = select_references(cve.references, self.settings.advisory_allowed_domains)
-        advisory_client = AdvisoryClient(
-            self.client, max_bytes=self.settings.advisory_max_bytes
-        )
+        cve = await CVEIngestionService(self.settings, self.client).analyze(normalized_id)
         fetched: list[FetchedAdvisory] = []
         results: list[AdvisoryResult] = []
         warnings = list(cve.warnings)
-
-        async def fetch_one(
-            item: SelectedReference,
-        ) -> tuple[SelectedReference, FetchedAdvisory | Exception]:
+        description = normalized_description_evidence(cve)
+        if description_source in {"auto", "opencve"}:
             try:
-                return item, await advisory_client.fetch(item)
-            except Exception as exc:
-                return item, exc
-
-        outcomes = await asyncio.gather(*(fetch_one(item) for item in selected))
-        for selected_item, outcome in outcomes:
-            if isinstance(outcome, FetchedAdvisory):
-                fetched.append(outcome)
-                results.append(
-                    AdvisoryResult(
-                        url=outcome.selected.reference.url,
-                        reference_tags=outcome.selected.reference.tags,
-                        selection_reason=outcome.selected.reason,
-                        retrieved_at=outcome.retrieved_at,
-                        checksum=outcome.checksum,
-                        extraction_status=ExtractionStatus.COMPLETED,
-                    )
+                description = await fetch_opencve_description(cve.cve_id, self.client)
+            except (httpx.HTTPError, ValueError) as exc:
+                if description_source == "opencve":
+                    raise
+                warnings.append(
+                    f"OpenCVE description unavailable ({type(exc).__name__}); "
+                    "using authoritative description"
                 )
             else:
-                status = (
-                    ExtractionStatus.UNSUPPORTED_CONTENT
-                    if isinstance(outcome, UnsupportedAdvisoryContent)
-                    else ExtractionStatus.FETCH_FAILED
-                )
-                results.append(
-                    AdvisoryResult(
-                        url=selected_item.reference.url,
-                        reference_tags=selected_item.reference.tags,
-                        selection_reason=selected_item.reason,
-                        extraction_status=status,
+                cve = cve.model_copy(deep=True)
+                cve.description = description.text
+                cve.field_provenance["description"] = ["OpenCVE"]
+                cve.sources.append(
+                    SourceAttribution(
+                        name="OpenCVE", url=description.source_url, retrieved_at=datetime.now(UTC)
                     )
                 )
-                warnings.append(f"Advisory unavailable: {selected_item.reference.url}")
-
-        model = self.agent.model if self.agent else "unconfigured"
-        cache_key = self._cache_key(fetched, model)
-        steps = await self.graph.cached_steps(cve.cve_id, cache_key) if fetched else None
-        if steps is None:
-            steps = []
-            if not fetched:
-                warnings.append("No trusted advisory evidence was available for extraction")
-            elif self.agent is None:
-                warnings.append("FH Genie is not configured; exploit-step extraction was skipped")
-                for result in results:
-                    if result.extraction_status == ExtractionStatus.COMPLETED:
-                        result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-            else:
-                try:
-                    steps = await self.agent.extract(cve.cve_id, fetched)
-                except ExtractionResponseError as exc:
-                    warnings.append(str(exc))
-                    for result in results:
-                        if result.extraction_status == ExtractionStatus.COMPLETED:
-                            result.extraction_status = ExtractionStatus.EXTRACTION_FAILED
-
-        await self.graph.replace_analysis(
-            cve,
-            fetched,
-            steps,
-            cache_key=cache_key,
-            model=model,
-            prompt_version=PROMPT_VERSION,
+        description_result = (
+            DescriptionEvidenceResult(
+                source_name=description.source_name,
+                source_url=description.source_url,
+                extraction_status=ExtractionStatus.COMPLETED,
+            )
+            if description
+            else None
         )
+        use_advisories = description_source == "advisories" or (
+            description_source == "auto"
+            and not description_is_substantive(description.text if description else None)
+        )
+        if use_advisories:
+            if description_source == "auto":
+                warnings.append("Description is empty or too short; using advisories")
+            fetched, results, advisory_warnings = await self._fetch_advisories(cve)
+            warnings.extend(advisory_warnings)
+
+        steps: list[ExploitStep] = []
+        if not (fetched or description):
+            warnings.append("No trusted description or advisory evidence was available")
+        elif description_source == "auto" and use_advisories and not fetched:
+            warnings.append(
+                "No advisory evidence was retrieved and the description is insufficient; "
+                "extraction was skipped"
+            )
+            self._mark_extraction_failed(description_result, results)
+        elif self.agent is None:
+            warnings.append(
+                "The selected inference provider is not configured; "
+                "exploit-step extraction was skipped"
+            )
+            self._mark_extraction_failed(description_result, results)
+        else:
+            try:
+                steps = await self.agent.extract(cve.cve_id, fetched, description)
+                if description_source == "auto" and not use_advisories and not steps:
+                    warnings.append(
+                        "Description extraction returned no steps; trying advisory evidence"
+                    )
+                    fetched, results, advisory_warnings = await self._fetch_advisories(cve)
+                    warnings.extend(advisory_warnings)
+                    # A second extraction uses newly retrieved evidence. Never repeat
+                    # the same description-only request if no advisory was fetched.
+                    if fetched:
+                        steps = await self.agent.extract(cve.cve_id, fetched, description)
+            except ExtractionResponseError as exc:
+                warnings.append(str(exc))
+                self._mark_extraction_failed(description_result, results)
+        if description_source == "auto" and not steps:
+            warnings.append("No exploit steps were extracted from the available evidence")
+
         mappings: list[AttackMapping] = []
-        mapping_completed = False
         if steps and self.mapper is None:
             warnings.append("FH Genie ATT&CK mapper is not configured")
         elif steps and self.mapper is not None:
-            platforms = sorted(
-                {
-                    platform
-                    for product in cve.affected_products
-                    for platform in product.platforms
-                }
-            )
             candidate_lists = await asyncio.gather(
                 *(
                     self.graph.attack_candidates(
                         step,
-                        platforms,
                         cve_id=cve.cve_id,
-                        cwe_ids=cve.cwe_ids,
-                        capec_ids=cve.capec_ids,
-                        cve_description=cve.description,
                     )
                     for step in steps
-                )
+                ),
+                return_exceptions=True,
             )
-            candidates = {
-                step.step: candidate_list
-                for step, candidate_list in zip(steps, candidate_lists, strict=True)
-            }
+            candidates: dict[int, list[AttackCandidate]] = {}
+            for step, candidate_list in zip(steps, candidate_lists, strict=True):
+                if isinstance(candidate_list, BaseException):
+                    warnings.append(
+                        f"ATT&CK candidate retrieval failed for step {step.step}: "
+                        f"{type(candidate_list).__name__}"
+                    )
+                    candidates[step.step] = []
+                else:
+                    candidates[step.step] = candidate_list
             try:
                 mappings = await self.mapper.map_steps(cve, steps, candidates)
-                mapping_completed = True
             except MappingResponseError as exc:
                 warnings.append(str(exc))
-            if mapping_completed:
-                await self.graph.replace_attack_mappings(
-                    cve.cve_id,
-                    mappings,
-                    model=self.mapper.model,
-                    prompt_version=MAPPING_PROMPT_VERSION,
-                )
-        attack_chain = []
-        if steps and not mappings:
-            attack_chain = unvalidated_chain(
-                steps, "No ATT&CK mapping was available for independent validation."
+        attack_chain = attack_chain_from_mappings(steps, mappings) if steps else []
+        cve_level_mappings = empty_ctid_mappings()
+        if not self.settings.enable_ctid_mapping:
+            logger.info(
+                "CTID mapping skipped",
+                extra={"cve_id": cve.cve_id, "ctid_skipped": True},
             )
-        elif mappings and self.validator is None:
-            warnings.append("FH Genie ATT&CK validator is not configured")
-            attack_chain = unvalidated_chain(
-                steps, "The proposed mapping was not promoted because validation is unavailable."
-            )
-        elif mappings and self.validator is not None:
-            official = await self.graph.official_attack_context(
-                [
-                    item.mitre_technique_id
-                    for item in mappings
-                    if item.mitre_technique_id is not None
-                ]
-            )
-            graph_facts = await self.graph.validation_facts(
-                cve.cve_id,
-                mappings,
-                sorted(
-                    {
-                        platform
-                        for product in cve.affected_products
-                        for platform in product.platforms
-                    }
-                ),
-            )
+        elif steps and self.ctid_mapper is None:
+            warnings.append("FH Genie CTID CVE-level mapper is not configured")
+            cve_level_mappings = empty_ctid_mappings()
+        elif steps and self.ctid_mapper:
             try:
-                attack_chain = await self.validator.validate(
-                    cve, steps, mappings, official, graph_facts
+                cve_level_mappings = await self.ctid_mapper.map(
+                    cve, steps, attack_chain, mappings
                 )
-            except ValidationResponseError as exc:
-                logger.error(
-                    "ATT&CK validation pipeline failed",
-                    extra={
-                        "cve_id": cve.cve_id,
-                        "validation_stage": "final_validation",
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                        "failure_reason": exc.failure_reason,
-                        "step": exc.context.get("step"),
-                        "technique_id": exc.context.get("technique_id"),
-                    },
+            except CTIDMappingError as exc:
+                logger.exception(
+                    "CVE-level CTID mapping failed",
+                    extra={"cve_id": cve.cve_id, "stage": "cve_level_attack_mappings"},
                 )
-                warnings.append(str(exc))
-                attack_chain = unvalidated_chain(
-                    steps,
-                    "The proposed mapping was not promoted because grounded validation failed.",
-                )
-        if attack_chain:
-            await self.graph.replace_validated_attack_chain(
-                cve.cve_id,
-                attack_chain,
-                mapping_model=self.mapper.model if self.mapper else "unconfigured",
-                mapping_prompt_version=MAPPING_PROMPT_VERSION,
-                validation_model=(
-                    self.validator.model if self.validator else "unconfigured"
-                ),
-                validation_prompt_version=VALIDATION_PROMPT_VERSION,
-            )
-        subgraph = await self.graph.subgraph(cve.cve_id)
+                warnings.append(f"CVE-level CTID mapping failed: {exc}")
+                cve_level_mappings = empty_ctid_mappings()
         return CVEAnalysis(
             cve=cve,
+            description_evidence=description_result,
             advisories=sorted(results, key=lambda item: str(item.url)),
             exploit_steps=steps,
             attack_mappings=mappings,
             attack_chain=attack_chain,
-            subgraph=subgraph,
+            cve_level_attack_mappings=cve_level_mappings,
+            subgraph=EvidenceSubgraph(),
             warnings=list(dict.fromkeys(warnings)),
         )
 
-    @staticmethod
-    def _cache_key(advisories: list[FetchedAdvisory], model: str) -> str:
-        material = "\0".join(
-            [
-                model,
-                PROMPT_VERSION,
-                hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
-                *sorted(item.checksum for item in advisories),
-            ]
+    async def _fetch_advisories(
+        self, cve: CVERecord
+    ) -> tuple[list[FetchedAdvisory], list[AdvisoryResult], list[str]]:
+        selected = sorted(
+            select_references(cve.references, self.settings.advisory_allowed_domains),
+            key=advisory_priority,
         )
-        return hashlib.sha256(material.encode()).hexdigest()
+        client = AdvisoryClient(self.client, max_bytes=self.settings.advisory_max_bytes)
+        fetched: list[FetchedAdvisory] = []
+        results: list[AdvisoryResult] = []
+        warnings: list[str] = []
+        for reference in selected:
+            try:
+                advisory = await client.fetch(reference)
+            except Exception as exc:
+                results.append(
+                    AdvisoryResult(
+                        url=reference.reference.url,
+                        reference_tags=reference.reference.tags,
+                        selection_reason=reference.reason,
+                        extraction_status=(
+                            ExtractionStatus.UNSUPPORTED_CONTENT
+                            if isinstance(exc, UnsupportedAdvisoryContent)
+                            else ExtractionStatus.FETCH_FAILED
+                        ),
+                    )
+                )
+                warnings.append(f"Advisory unavailable: {reference.reference.url}")
+            else:
+                fetched.append(advisory)
+                results.append(
+                    AdvisoryResult(
+                        url=advisory.selected.reference.url,
+                        reference_tags=advisory.selected.reference.tags,
+                        selection_reason=advisory.selected.reason,
+                        retrieved_at=advisory.retrieved_at,
+                        checksum=advisory.checksum,
+                        extraction_status=ExtractionStatus.COMPLETED,
+                    )
+                )
+                if len(fetched) == MAX_SUCCESSFUL_ADVISORIES:
+                    break
+        return fetched, results, warnings
+
+    @staticmethod
+    def _mark_extraction_failed(
+        description: DescriptionEvidenceResult | None, advisories: list[AdvisoryResult]
+    ) -> None:
+        if description:
+            description.extraction_status = ExtractionStatus.EXTRACTION_FAILED
+        for advisory in advisories:
+            if advisory.extraction_status == ExtractionStatus.COMPLETED:
+                advisory.extraction_status = ExtractionStatus.EXTRACTION_FAILED
